@@ -1,0 +1,15 @@
+FROM alpine:3.21.0
+
+RUN addgroup -S ory; \
+    adduser -S ory -G ory -D -H -s /bin/nologin
+RUN apk --no-cache --update-cache --upgrade add ca-certificates
+
+COPY oathkeeper /usr/bin/oathkeeper
+
+USER ory
+
+EXPOSE 4455
+EXPOSE 4456
+
+ENTRYPOINT ["oathkeeper"]
+CMD ["serve"]

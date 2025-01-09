@@ -1,0 +1,50 @@
+[
+  {
+    "id": "test-rule-http",
+    "upstream": {
+      "url": "https://example.com/",
+      "strip_path": "http"
+    },
+    "match": {
+      "url": "http://127.0.0.1:6060/http",
+      "methods": ["GET"]
+    },
+    "authenticators": [
+      {
+        "handler": "noop"
+      }
+    ],
+    "authorizer": {
+      "handler": "allow"
+    },
+    "mutators": [
+      {
+        "handler": "noop"
+      }
+    ]
+  },
+  {
+    "id": "test-rule-https",
+    "upstream": {
+      "url": "https://example.com/",
+      "strip_path": "https"
+    },
+    "match": {
+      "url": "https://127.0.0.1:6060/https",
+      "methods": ["GET"]
+    },
+    "authenticators": [
+      {
+        "handler": "noop"
+      }
+    ],
+    "authorizer": {
+      "handler": "allow"
+    },
+    "mutators": [
+      {
+        "handler": "noop"
+      }
+    ]
+  }
+]
