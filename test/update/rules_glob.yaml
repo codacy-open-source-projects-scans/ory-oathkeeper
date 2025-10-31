@@ -1,0 +1,12 @@
+- id: test-rule-1-glob
+  match:
+    url: myproxy.com/<m.n>
+    methods:
+      - GET
+      - POST
+  authenticators:
+    - handler: anonymous
+  authorizer:
+    handler: allow
+  mutators:
+    - handler: noop

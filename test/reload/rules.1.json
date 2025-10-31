@@ -1,0 +1,26 @@
+[
+  {
+    "id": "test-rule-1",
+    "upstream": {
+      "url": "https://example.com/",
+      "strip_path": "/rules"
+    },
+    "match": {
+      "url": "http://127.0.0.1:6060/rules",
+      "methods": ["GET"]
+    },
+    "authenticators": [
+      {
+        "handler": "noop"
+      }
+    ],
+    "authorizer": {
+      "handler": "allow"
+    },
+    "mutators": [
+      {
+        "handler": "noop"
+      }
+    ]
+  }
+]

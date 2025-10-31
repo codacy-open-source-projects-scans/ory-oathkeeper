@@ -1,0 +1,97 @@
+[
+  {
+    "id": "test-rule-1",
+    "upstream": {
+      "preserve_host": true,
+      "strip_path": "/api",
+      "url": "https://mybackend.com/api"
+    },
+    "match": {
+      "url": "myproxy.com/api",
+      "methods": ["GET", "POST"]
+    },
+    "authenticators": [
+      {
+        "handler": "noop"
+      },
+      {
+        "handler": "anonymous"
+      }
+    ],
+    "authorizer": {
+      "handler": "allow"
+    },
+    "mutators": [
+      {
+        "handler": "noop"
+      }
+    ]
+  },
+  {
+    "id": "test-rule-2",
+    "upstream": {
+      "preserve_host": true,
+      "strip_path": "/api",
+      "url": "https://mybackend.com/api"
+    },
+    "match": {
+      "url": "myproxy.com/api",
+      "methods": ["GET", "POST"]
+    },
+    "authenticators": [
+      {
+        "handler": "noop"
+      },
+      {
+        "handler": "anonymous"
+      }
+    ],
+    "authorizer": {
+      "handler": "deny"
+    },
+    "mutators": [
+      {
+        "handler": "id_token"
+      },
+      {
+        "handler": "header",
+        "config": {
+          "headers": {
+            "X-User": "{{ print .Subject }}"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "id": "test-rule-3",
+    "upstream": {
+      "preserve_host": true,
+      "strip_path": "/api",
+      "url": "https://mybackend.com/api"
+    },
+    "match": {
+      "url": "myproxy.com/api",
+      "methods": ["GET", "POST"]
+    },
+    "authenticators": [
+      {
+        "handler": "noop"
+      },
+      {
+        "handler": "anonymous"
+      }
+    ],
+    "authorizer": {
+      "handler": "allow"
+    },
+    "mutators": [
+      {
+        "handler": "id_token",
+        "config": {
+          "jwks_url": "http://stub/"
+        }
+      }
+    ]
+  }
+]
