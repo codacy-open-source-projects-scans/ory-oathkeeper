@@ -21,7 +21,6 @@ killall oathkeeper || true
 
 export OATHKEEPER_PROXY=http://127.0.0.1:6060
 export OATHKEEPER_API=http://127.0.0.1:6061
-export GO111MODULE=on
 
 cp config.1.yaml config.yaml
 

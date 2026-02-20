@@ -4,6 +4,7 @@
 package authn
 
 import (
+	"cmp"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -17,7 +18,6 @@ import (
 
 	"github.com/ory/oathkeeper/x/header"
 	"github.com/ory/x/otelx"
-	"github.com/ory/x/stringsx"
 
 	"github.com/ory/herodot"
 
@@ -153,8 +153,8 @@ func (a *AuthenticatorCookieSession) Authenticate(r *http.Request, session *Auth
 		subject string
 		extra   map[string]interface{}
 
-		subjectRaw = []byte(stringsx.Coalesce(gjson.GetBytes(body, cf.SubjectFrom).Raw, "null"))
-		extraRaw   = []byte(stringsx.Coalesce(gjson.GetBytes(body, cf.ExtraFrom).Raw, "null"))
+		subjectRaw = []byte(cmp.Or(gjson.GetBytes(body, cf.SubjectFrom).Raw, "null"))
+		extraRaw   = []byte(cmp.Or(gjson.GetBytes(body, cf.ExtraFrom).Raw, "null"))
 	)
 
 	if err = json.Unmarshal(subjectRaw, &subject); err != nil {

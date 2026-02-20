@@ -227,7 +227,6 @@ func TestKoanfProvider(t *testing.T) {
 			*x.ParseURLOrPanic("inline://W3siaWQiOiJmb28tcnVsZSIsImF1dGhlbnRpY2F0b3JzIjpbXX1d"),
 			*x.ParseURLOrPanic("https://path-to-my-rules/rules.json"),
 		}, p.AccessRuleRepositories())
-
 	})
 
 	t.Run("group=authenticators", func(t *testing.T) {
@@ -432,7 +431,7 @@ func TestAuthenticatorOAuth2TokenIntrospectionPreAuthorization(t *testing.T) {
 		{enabled: true, id: "a", secret: "b", turl: "https://some-url", err: false},
 	} {
 		t.Run(fmt.Sprintf("case=%d", k), func(t *testing.T) {
-			a := authn.NewAuthenticatorOAuth2Introspection(p, logrusx.New("", ""), noop.NewTracerProvider()) //nolint:staticcheck // tests only need noop tracer
+			a := authn.NewAuthenticatorOAuth2Introspection(p, logrusx.New("", ""), noop.NewTracerProvider())
 
 			config, _, err := a.Config(json.RawMessage(fmt.Sprintf(`{
 	"pre_authorization": {

@@ -1,6 +1,6 @@
 module github.com/ory/oathkeeper
 
-go 1.25
+go 1.26
 
 replace github.com/mattn/go-sqlite3 => github.com/mattn/go-sqlite3 v1.14.28
 

@@ -4,6 +4,7 @@
 package errors
 
 import (
+	"cmp"
 	"mime"
 	"net"
 	"net/http"
@@ -151,7 +152,7 @@ func matchesRequest(when When, r *http.Request) error {
 	}
 
 	if when.Request.Header != nil && len(when.Request.Header.ContentType) > 0 {
-		contentTypes, err := clearMIMEParams(stringsx.Coalesce(r.Header.Get("Content-Type"), "application/octet-stream"))
+		contentTypes, err := clearMIMEParams(cmp.Or(r.Header.Get("Content-Type"), "application/octet-stream"))
 		if err != nil {
 			return err
 		}
@@ -162,7 +163,7 @@ func matchesRequest(when When, r *http.Request) error {
 
 	if when.Request.Header != nil && len(when.Request.Header.Accept) > 0 {
 		if !matchesAcceptMIME(
-			stringsx.Coalesce(r.Header.Get("Accept"), "application/octet-stream"),
+			cmp.Or(r.Header.Get("Accept"), "application/octet-stream"),
 			when.Request.Header.Accept,
 		) {
 			return errors.WithStack(ErrDoesNotMatchWhen)

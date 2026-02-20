@@ -43,7 +43,6 @@ To install Oathkeeper from source:
 cd ~
 go get -d -u github.com/ory/oathkeeper
 cd $GOPATH/src/github.com/ory/oathkeeper
-export GO111MODULE=on
 make install
 ```
 

@@ -8,6 +8,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/rsa"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -17,7 +18,6 @@ import (
 	"github.com/ory/herodot"
 	"github.com/ory/oathkeeper/helper"
 	"github.com/ory/x/jwtx"
-	"github.com/ory/x/stringslice"
 	"github.com/ory/x/stringsx"
 )
 
@@ -40,7 +40,7 @@ func (v *VerifierDefault) Verify(
 ) (*jwt.Token, error) {
 	// Parse the token.
 	t, err := jwt.ParseWithClaims(token, jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
-		if !stringslice.Has(r.Algorithms, fmt.Sprintf("%s", token.Header["alg"])) {
+		if !slices.Contains(r.Algorithms, fmt.Sprintf("%s", token.Header["alg"])) {
 			return nil, errors.WithStack(herodot.ErrInternalServerError.WithReason(fmt.Sprintf(`JSON Web Token used signing method "%s" which is not allowed.`, token.Header["alg"])))
 		}
 
@@ -84,9 +84,7 @@ func (v *VerifierDefault) Verify(
 		return nil, errors.WithStack(herodot.ErrBadRequest.WithReasonf(`The signing key algorithm does not match the algorithm from the token header.`))
 	}, jwt.WithIssuedAt())
 	if err != nil {
-		//nolint:staticcheck // explicit list kept even if entries repeat
 		if errors.Is(err, jwt.ErrTokenUnverifiable) ||
-			errors.Is(err, jwt.ErrTokenUnverifiable) ||
 			errors.Is(err, jwt.ErrTokenSignatureInvalid) ||
 			errors.Is(err, jwt.ErrTokenInvalidClaims) ||
 			errors.Is(err, jwt.ErrTokenMalformed) {
@@ -104,13 +102,13 @@ func (v *VerifierDefault) Verify(
 
 	parsedClaims := jwtx.ParseMapStringInterfaceClaims(claims)
 	for _, audience := range r.Audiences {
-		if !stringslice.Has(parsedClaims.Audience, audience) {
+		if !slices.Contains(parsedClaims.Audience, audience) {
 			return nil, herodot.ErrUnauthorized.WithReasonf("Token audience %v is not intended for target audience %s.", parsedClaims.Audience, audience)
 		}
 	}
 
 	if len(r.Issuers) > 0 {
-		if !stringslice.Has(r.Issuers, parsedClaims.Issuer) {
+		if !slices.Contains(r.Issuers, parsedClaims.Issuer) {
 			return nil, herodot.ErrUnauthorized.WithReasonf("Token issuer does not match any trusted issuer %s.", parsedClaims.Issuer).
 				WithDetail("received issuers", strings.Join(r.Issuers, ", "))
 		}

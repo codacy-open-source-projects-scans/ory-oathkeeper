@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -28,7 +29,6 @@ import (
 	"github.com/ory/x/httpx"
 	"github.com/ory/x/logrusx"
 	"github.com/ory/x/otelx"
-	"github.com/ory/x/stringslice"
 )
 
 type AuthenticatorOAuth2IntrospectionConfiguration struct {
@@ -242,13 +242,13 @@ func (a *AuthenticatorOAuth2Introspection) Authenticate(r *http.Request, session
 	}
 
 	for _, audience := range cf.Audience {
-		if !stringslice.Has(i.Audience, audience) {
+		if !slices.Contains([]string(i.Audience), audience) {
 			return errors.WithStack(helper.ErrForbidden.WithReason(fmt.Sprintf("Token audience is not intended for target audience %s", audience)))
 		}
 	}
 
 	if len(cf.Issuers) > 0 {
-		if !stringslice.Has(cf.Issuers, i.Issuer) {
+		if !slices.Contains(cf.Issuers, i.Issuer) {
 			return errors.WithStack(helper.ErrForbidden.WithReason("Token issuer does not match any trusted issuer"))
 		}
 	}

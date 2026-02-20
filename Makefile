@@ -1,6 +1,5 @@
 SHELL=/bin/bash -o pipefail
 
-export GO111MODULE	:= on
 export PATH					:= .bin:${PATH}
 export PWD					:= $(shell pwd)
 export IMAGE_TAG		:= $(if $(IMAGE_TAG),$(IMAGE_TAG),dev)
@@ -34,7 +33,7 @@ node_modules: package-lock.json
 	touch .bin/ory
 
 .bin/golangci-lint: Makefile
-	curl --retry 7 --retry-connrefused -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -d -b .bin v2.4.0
+	curl --retry 7 --retry-connrefused -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -d -b .bin v2.10.1
 
 authors:  # updates the AUTHORS file
 	curl --retry 7 --retry-connrefused https://raw.githubusercontent.com/ory/ci/master/authors/authors.sh | env PRODUCT="Ory Oathkeeper" bash
@@ -79,14 +78,14 @@ sdk: .bin/swagger .bin/ory node_modules
 install-stable:
 	OATHKEEPER_LATEST=$$(git describe --abbrev=0 --tags)
 	git checkout $$OATHKEEPER_LATEST
-	GO111MODULE=on go install \
+	go install \
 		-ldflags "-X github.com/ory/oathkeeper/x.Version=$$OATHKEEPER_LATEST -X github.com/ory/oathkeeper/x.Date=`TZ=UTC date -u '+%Y-%m-%dT%H:%M:%SZ'` -X github.com/ory/oathkeeper/x.Commit=`git rev-parse HEAD`" \
 		.
 	git checkout master
 
 .PHONY: install
 install:
-	GO111MODULE=on go install .
+	go install .
 
 .PHONY: docker
 docker:

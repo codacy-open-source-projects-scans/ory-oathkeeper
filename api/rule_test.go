@@ -14,8 +14,6 @@ import (
 	"github.com/ory/oathkeeper/driver/configuration"
 	"github.com/ory/oathkeeper/x"
 
-	"github.com/ory/x/pointerx"
-
 	"github.com/ory/oathkeeper/internal"
 	"github.com/ory/oathkeeper/internal/httpclient/client"
 	sdkrule "github.com/ory/oathkeeper/internal/httpclient/client/api"
@@ -115,7 +113,7 @@ func TestHandler(t *testing.T) {
 		testFunc := func(strategy configuration.MatchingStrategy, rules []rule.Rule) {
 			reg.RuleRepository().(*rule.RepositoryMemory).WithRules(rules)
 			require.NoError(t, reg.RuleRepository().SetMatchingStrategy(context.Background(), strategy))
-			results, err := cl.API.ListRules(sdkrule.NewListRulesParams().WithLimit(pointerx.Int64(10)))
+			results, err := cl.API.ListRules(sdkrule.NewListRulesParams().WithLimit(new(int64(10))))
 			require.NoError(t, err)
 			require.Len(t, results.Payload, 2)
 			assert.True(t, results.Payload[0].ID != results.Payload[1].ID)

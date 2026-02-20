@@ -3,7 +3,27 @@ version: "2"
 linters:
   enable:
     - gosec
+    - govet
     - errcheck
     - ineffassign
     - staticcheck
     - unused
+  disable:
+    - bodyclose # too many false negatives
+
+  settings:
+    gosec:
+      excludes:
+        - G101
+        - G115
+        - G117
+        - G306
+        - G602
+        - G703
+        - G704
+        - G705
+  exclusions:
+    rules:
+      - linters:
+          - staticcheck
+        text: "SA1019" # we do use deprecated APIs on purpose sometimes

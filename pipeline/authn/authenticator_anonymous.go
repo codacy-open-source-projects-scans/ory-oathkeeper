@@ -4,10 +4,9 @@
 package authn
 
 import (
+	"cmp"
 	"encoding/json"
 	"net/http"
-
-	"github.com/ory/x/stringsx"
 
 	"github.com/ory/oathkeeper/driver/configuration"
 	"github.com/ory/oathkeeper/pipeline"
@@ -61,7 +60,7 @@ func (a *AuthenticatorAnonymous) Authenticate(r *http.Request, session *Authenti
 		return err
 	}
 
-	session.Subject = stringsx.Coalesce(cf.Subject, "anonymous")
+	session.Subject = cmp.Or(cf.Subject, "anonymous")
 
 	return nil
 }

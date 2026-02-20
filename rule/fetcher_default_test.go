@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -27,8 +28,6 @@ import (
 
 	"github.com/ory/x/configx"
 	"github.com/ory/x/logrusx"
-
-	"github.com/ory/x/stringslice"
 
 	"github.com/ory/oathkeeper/driver/configuration"
 	"github.com/ory/oathkeeper/internal"
@@ -368,7 +367,7 @@ access_rules:
 			}
 
 			for _, id := range tc.ids {
-				assert.True(t, stringslice.Has(ids, id), "\nexpected: %v\nactual: %v", tc.ids, ids)
+				assert.True(t, slices.Contains(ids, id), "\nexpected: %v\nactual: %v", tc.ids, ids)
 			}
 		})
 	}

@@ -4,6 +4,7 @@
 package authn
 
 import (
+	"cmp"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -18,7 +19,6 @@ import (
 	"github.com/ory/oathkeeper/pipeline"
 	"github.com/ory/oathkeeper/x/header"
 	"github.com/ory/x/otelx"
-	"github.com/ory/x/stringsx"
 )
 
 func init() {
@@ -150,8 +150,8 @@ func (a *AuthenticatorBearerToken) Authenticate(r *http.Request, session *Authen
 		subject string
 		extra   map[string]interface{}
 
-		subjectRaw = []byte(stringsx.Coalesce(gjson.GetBytes(body, cf.SubjectFrom).Raw, "null"))
-		extraRaw   = []byte(stringsx.Coalesce(gjson.GetBytes(body, cf.ExtraFrom).Raw, "null"))
+		subjectRaw = []byte(cmp.Or(gjson.GetBytes(body, cf.SubjectFrom).Raw, "null"))
+		extraRaw   = []byte(cmp.Or(gjson.GetBytes(body, cf.ExtraFrom).Raw, "null"))
 	)
 
 	if err = json.Unmarshal(subjectRaw, &subject); err != nil {

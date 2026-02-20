@@ -4,6 +4,7 @@
 package rule
 
 import (
+	"cmp"
 	"fmt"
 	"regexp"
 	"strings"
@@ -14,18 +15,13 @@ import (
 	"github.com/tidwall/sjson"
 
 	"github.com/ory/herodot"
-	"github.com/ory/x/stringsx"
 
 	"github.com/ory/oathkeeper/x"
 )
 
 func migrateRuleJSON(raw []byte) ([]byte, error) {
 	rv := strings.TrimPrefix(
-		stringsx.Coalesce(
-			gjson.GetBytes(raw, "version").String(),
-			x.Version,
-			x.UnknownVersion,
-		),
+		cmp.Or(gjson.GetBytes(raw, "version").String(), x.Version, x.UnknownVersion),
 		"v",
 	)
 
