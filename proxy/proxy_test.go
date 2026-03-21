@@ -19,6 +19,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/ory/x/configx"
+
 	"github.com/ory/oathkeeper/driver/configuration"
 	"github.com/ory/oathkeeper/internal"
 	"github.com/ory/oathkeeper/proxy"
@@ -28,22 +30,21 @@ import (
 
 func TestProxy(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// assert.NotEmpty(t, helper.BearerTokenFromRequest(r))
-		fmt.Fprint(w, "authorization="+r.Header.Get("Authorization")+"\n") //nolint:errcheck // best-effort debug output
-		fmt.Fprint(w, "host="+r.Host+"\n")                                 //nolint:errcheck // best-effort debug output
-		fmt.Fprint(w, "url="+r.URL.String()+"\n")                          //nolint:errcheck // best-effort debug output
+		_, _ = fmt.Fprintf(w, "authorization=%s\n", r.Header.Get("Authorization"))
+		_, _ = fmt.Fprintf(w, "host=%s\n", r.Host)
+		_, _ = fmt.Fprintf(w, "url=%s\n", r.URL)
 		for k, v := range r.Header {
-			fmt.Fprint(w, "header "+k+"="+strings.Join(v, ",")+"\n") //nolint:errcheck // best-effort debug output
+			_, _ = fmt.Fprintf(w, "header %s=%s\n", k, strings.Join(v, ","))
 		}
 	}))
-	defer backend.Close()
+	t.Cleanup(backend.Close)
 
 	conf := internal.NewConfigurationWithDefaults()
 	reg := internal.NewRegistry(conf).WithBrokenPipelineMutator()
 
 	d := reg.Proxy()
 	ts := httptest.NewServer(&httputil.ReverseProxy{Rewrite: d.Rewrite, Transport: d})
-	defer ts.Close()
+	t.Cleanup(ts.Close)
 
 	conf.SetForTest(t, configuration.AuthenticatorNoopIsEnabled, true)
 	conf.SetForTest(t, configuration.AuthenticatorUnauthorizedIsEnabled, true)
@@ -496,10 +497,10 @@ func TestConfigureBackendURL(t *testing.T) {
 			eHost: "localhost:3000",
 		},
 		{
-			r:     &http.Request{Host: "localhost:3000", URL: &url.URL{Path: "/api/users/1234", Scheme: "http"}},
-			rl:    &rule.Rule{Upstream: rule.Upstream{URL: "http://localhost:4000/foo/", PreserveHost: true, StripPath: "api"}},
-			eURL:  "http://localhost:4000/foo/users/1234",
-			eHost: "localhost:3000",
+			r:     &http.Request{Host: "localhost:3000", URL: &url.URL{Path: "/api/../users/1234", Scheme: "http"}},
+			rl:    &rule.Rule{Upstream: rule.Upstream{URL: "http://localhost:4000"}},
+			eURL:  "http://localhost:4000/users/1234",
+			eHost: "localhost:4000",
 		},
 	} {
 		t.Run(fmt.Sprintf("case=%d", k), func(t *testing.T) {
@@ -512,34 +513,38 @@ func TestConfigureBackendURL(t *testing.T) {
 
 func TestEnrichRequestedURL(t *testing.T) {
 	for k, tc := range []struct {
-		req    *httputil.ProxyRequest
-		expect url.URL
+		req                 *http.Request
+		trustForwardHeaders bool
+		expect              url.URL
 	}{
 		{
-			req: &httputil.ProxyRequest{
-				In:  &http.Request{Host: "test", TLS: &tls.ConnectionState{}, URL: new(url.URL)},
-				Out: &http.Request{Host: "test", TLS: &tls.ConnectionState{}, URL: new(url.URL)},
-			},
+			req:    &http.Request{Host: "test", TLS: new(tls.ConnectionState), URL: new(url.URL)},
 			expect: url.URL{Scheme: "https", Host: "test"},
 		},
 		{
-			req: &httputil.ProxyRequest{
-				In:  &http.Request{Host: "test", URL: new(url.URL)},
-				Out: &http.Request{Host: "test", URL: new(url.URL)},
-			},
+			req:    &http.Request{Host: "test", URL: new(url.URL)},
 			expect: url.URL{Scheme: "http", Host: "test"},
 		},
 		{
-			req: &httputil.ProxyRequest{
-				In:  &http.Request{Host: "test", Header: http.Header{"X-Forwarded-Proto": {"https"}}, URL: new(url.URL)},
-				Out: &http.Request{Host: "test", URL: new(url.URL)},
-			},
-			expect: url.URL{Scheme: "https", Host: "test"},
+			req:                 &http.Request{Host: "test", Header: http.Header{"X-Forwarded-Proto": {"https"}}, URL: new(url.URL)},
+			trustForwardHeaders: true,
+			expect:              url.URL{Scheme: "https", Host: "test"},
+		},
+		{
+			req:                 &http.Request{Host: "test", Header: http.Header{"X-Forwarded-Proto": {"https"}}, URL: new(url.URL)},
+			trustForwardHeaders: false,
+			expect:              url.URL{Scheme: "http", Host: "test"},
+		},
+		{
+			req:                 &http.Request{Host: "test", Header: http.Header{"X-Forwarded-Proto": {"http"}}, TLS: new(tls.ConnectionState), URL: new(url.URL)},
+			trustForwardHeaders: true,
+			expect:              url.URL{Scheme: "http", Host: "test"},
 		},
 	} {
 		t.Run(fmt.Sprintf("case=%d", k), func(t *testing.T) {
-			proxy.EnrichRequestedURL(tc.req)
-			assert.EqualValues(t, tc.expect, *tc.req.Out.URL)
+			req := &httputil.ProxyRequest{In: tc.req, Out: &http.Request{URL: new(url.URL)}}
+			proxy.EnrichRequestedURL(req, tc.trustForwardHeaders)
+			assert.EqualValues(t, tc.expect, *req.Out.URL)
 		})
 	}
 }
@@ -578,9 +583,7 @@ func TestRateLimitHeaderPropagation(t *testing.T) {
 	}))
 	defer rateLimitUpstream.Close()
 
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, "ok") //nolint:errcheck // test
-	}))
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = fmt.Fprint(w, "ok") }))
 	defer backend.Close()
 
 	conf := internal.NewConfigurationWithDefaults()
@@ -623,45 +626,83 @@ func TestRateLimitHeaderPropagation(t *testing.T) {
 	assert.Equal(t, "1709042400", res.Header.Get("X-Ratelimit-Reset"))
 }
 
-//
-// func BenchmarkDirector(b *testing.B) {
-//	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-//		fmt.Fprint(w, "authorization="+r.Header.Get("Authorization"))
-//		fmt.Fprint(w, "host="+r.Header.Get("Host"))
-//		fmt.Fprint(w, "url="+r.URL.String())
-//		fmt.Fprint(w, "path="+r.URL.Path)
-//	}))
-//	defer backend.Close()
-//
-//	logger := logrus.New()
-//	logger.Level = logrus.WarnLevel
-//	u, _ := url.Parse(backend.URL)
-//	d := NewProxy(nil, logger, &rsakey.LocalManager{KeyStrength: 512})
-//
-//	p := httptest.NewServer(&httputil.ReverseProxy{Director: d.Director, Transport: d})
-//	defer p.Close()
-//
-//	jt := &JurorPassThrough{L: logrus.New()}
-//	matcher := &rule.CachedMatcher{Rules: map[string]rule.Rule{
-//		"A": {MatchesMethods: []string{"GET"}, MatchesURLCompiled: panicCompileRegex(p.URL + "/users"), Mode: jt.GetID(), Upstream: rule.Upstream{URLParsed: u}},
-//		"B": {MatchesMethods: []string{"GET"}, MatchesURLCompiled: panicCompileRegex(p.URL + "/users/<[0-9]+>"), Mode: jt.GetID(), Upstream: rule.Upstream{URLParsed: u}},
-//		"C": {MatchesMethods: []string{"GET"}, MatchesURLCompiled: panicCompileRegex(p.URL + "/<[0-9]+>"), Mode: jt.GetID(), Upstream: rule.Upstream{URLParsed: u}},
-//		"D": {MatchesMethods: []string{"GET"}, MatchesURLCompiled: panicCompileRegex(p.URL + "/other/<.+>"), Mode: jt.GetID(), Upstream: rule.Upstream{URLParsed: u}},
-//	}}
-//	d.Judge = NewRequestHandler(logger, matcher, "", []Juror{jt})
-//
-//	req, _ := http.NewRequest("GET", p.URL+"/users", nil)
-//
-//	b.Run("case=fetch_user_endpoint", func(b *testing.B) {
-//		for n := 0; n < b.N; n++ {
-//			res, err := http.DefaultClient.Do(req)
-//			if err != nil {
-//				b.FailNow()
-//			}
-//
-//			if res.StatusCode != http.StatusOK {
-//				b.FailNow()
-//			}
-//		}
-//	})
-// }
+func TestDoNotUseXForwardedWhenUntrusted(t *testing.T) {
+	conf := internal.NewConfigurationWithDefaults(configx.WithValues(map[string]any{
+		configuration.ProxyTrustForwardedHeaders:                                false,
+		configuration.AuthenticatorAnonymousIsEnabled:                           true,
+		configuration.AuthorizerAllowIsEnabled:                                  true,
+		configuration.AuthorizerDenyIsEnabled:                                   true,
+		configuration.MutatorNoopIsEnabled:                                      true,
+		configuration.ErrorsJSONIsEnabled:                                       true,
+		configuration.ErrorsRedirectIsEnabled:                                   true,
+		configuration.ErrorsHandlers + ".redirect.config.to":                    "http://example.com/error",
+		configuration.ErrorsHandlers + ".redirect.config.return_to_query_param": "return_to",
+		configuration.ErrorsFallback:                                            []string{"redirect"},
+	}))
+	reg := internal.NewRegistry(conf)
+
+	d := reg.Proxy()
+	proxyServer := httptest.NewServer(&httputil.ReverseProxy{Rewrite: d.Rewrite, Transport: d})
+	t.Cleanup(proxyServer.Close)
+
+	ruleURL := proxyServer.URL + "/https-only"
+	rls := []rule.Rule{{
+		ID:             "https-allow",
+		Match:          &rule.Match{Methods: []string{"GET"}, URL: strings.Replace(ruleURL, "http://", "https://", 1)},
+		Authenticators: []rule.Handler{{Handler: "anonymous"}},
+		Authorizer:     rule.Handler{Handler: "allow"},
+		Mutators:       []rule.Handler{{Handler: "noop"}},
+		Errors:         []rule.ErrorHandler{{Handler: "json"}},
+	}, {
+		ID:             "http-deny",
+		Match:          &rule.Match{Methods: []string{"GET"}, URL: ruleURL},
+		Authenticators: []rule.Handler{{Handler: "anonymous"}},
+		Authorizer:     rule.Handler{Handler: "deny"},
+		Mutators:       []rule.Handler{{Handler: "noop"}},
+		Errors:         []rule.ErrorHandler{{Handler: "json"}},
+	}}
+
+	repo := reg.RuleRepository().(*rule.RepositoryMemory)
+	repo.WithRules(rls)
+	require.NoError(t, repo.SetMatchingStrategy(t.Context(), configuration.Regexp))
+
+	t.Run("x-forwarded-proto during matching", func(t *testing.T) {
+		// Baseline: plain HTTP request does not match HTTPS-only rule.
+		res1, err := http.Get(ruleURL) // #nosec G107 -- this is a test supposed to make an HTTP request
+		require.NoError(t, err)
+		_ = res1.Body.Close()
+		require.Equal(t, http.StatusForbidden, res1.StatusCode)
+
+		// try to spoof scheme via untrusted X-Forwarded-Proto header; should still be denied
+		req2, err := http.NewRequest(http.MethodGet, ruleURL, nil) // #nosec G107 -- this is a test supposed to make an HTTP request
+		require.NoError(t, err)
+		req2.Header.Set("X-Forwarded-Proto", "https")
+		res2, err := http.DefaultClient.Do(req2)
+		require.NoError(t, err)
+		_ = res2.Body.Close()
+
+		assert.Equal(t, http.StatusForbidden, res2.StatusCode, "X-Forwarded-Proto unexpectedly affected URL scheme matching")
+	})
+
+	t.Run("x-forwarded headers not used for redirect on error", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, ruleURL+"/404", nil) // #nosec G107 -- this is a test supposed to make an HTTP request
+		require.NoError(t, err)
+		req.Header.Set("X-Forwarded-Proto", "https")
+		req.Header.Set("X-Forwarded-Host", "otherhost.com")
+		req.Header.Set("X-Forwarded-Uri", "/otherpath")
+
+		cl := http.Client{}
+		cl.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+		res, err := cl.Do(req)
+		require.NoError(t, err)
+		_ = res.Body.Close()
+
+		require.Equal(t, http.StatusFound, res.StatusCode)
+		u, err := url.Parse(res.Header.Get("Location"))
+		require.NoError(t, err)
+		assert.Equal(t, "http", u.Scheme)
+		assert.Equal(t, "example.com", u.Host)
+		assert.Equal(t, "/error", u.Path)
+		assert.Equal(t, ruleURL+"/404", u.Query().Get("return_to"))
+	})
+}

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path"
 	"strings"
 
 	"github.com/ory/oathkeeper/driver/configuration"
@@ -111,19 +112,28 @@ func (d *Proxy) RoundTrip(r *http.Request) (*http.Response, error) {
 
 func (d *Proxy) Rewrite(r *httputil.ProxyRequest) {
 	if d.c.ProxyTrustForwardedHeaders() {
-		headers := []string{
+		for _, h := range []string{
 			"X-Forwarded-Host",
 			"X-Forwarded-Proto",
 			"X-Forwarded-For",
-		}
-		for _, h := range headers {
+		} {
 			if v := r.In.Header.Get(h); v != "" {
 				r.Out.Header.Set(h, v)
 			}
 		}
+	} else {
+		// Remove any forwarded headers if the proxy is not trusted to prevent spoofing.
+		// The httputil.ReverseProxy removes X-Forwarded, X-Forwarded-Host, and X-Forwarded-Proto
+		// headers by default, but we want to be sure that all of them are removed.
+		for h := range r.Out.Header {
+			lh := strings.ToLower(h)
+			if strings.HasPrefix(lh, "x-forwarded") || lh == "forwarded" {
+				r.Out.Header.Del(h)
+			}
+		}
 	}
 
-	EnrichRequestedURL(r)
+	EnrichRequestedURL(r, d.c.ProxyTrustForwardedHeaders())
 	rl, err := d.r.RuleMatcher().Match(r.Out.Context(), r.Out.Method, r.Out.URL, rule.ProtocolHTTP)
 	if err != nil {
 		*r.Out = *r.Out.WithContext(context.WithValue(r.Out.Context(), director, err))
@@ -166,11 +176,20 @@ func CopyHeaders(headers http.Header, r *http.Request) {
 
 // EnrichRequestedURL sets Scheme and Host values in a URL passed down by a http server. Per default, the URL
 // does not contain host nor scheme values.
-func EnrichRequestedURL(r *httputil.ProxyRequest) {
-	r.Out.URL.Scheme = "http"
+func EnrichRequestedURL(r *httputil.ProxyRequest, trustForwardedHeaders bool) {
 	r.Out.URL.Host = r.In.Host
-	if r.In.TLS != nil || strings.EqualFold(r.In.Header.Get("X-Forwarded-Proto"), "https") {
+	switch {
+	case trustForwardedHeaders && strings.EqualFold(r.In.Header.Get("X-Forwarded-Proto"), "https"):
 		r.Out.URL.Scheme = "https"
+	case trustForwardedHeaders && strings.EqualFold(r.In.Header.Get("X-Forwarded-Proto"), "http"):
+		r.Out.URL.Scheme = "http"
+	case r.In.TLS != nil:
+		// fallback to TLS check only if the header is not set or the proxy is not trusted
+		// otherwise the header should be trusted as it is coming from a trusted proxy
+		r.Out.URL.Scheme = "https"
+
+	default:
+		r.Out.URL.Scheme = "http"
 	}
 }
 
@@ -194,7 +213,7 @@ func ConfigureBackendURL(r *http.Request, rl *rule.Rule) error {
 	forwardURL := r.URL
 	forwardURL.Scheme = backendScheme
 	forwardURL.Host = backendHost
-	forwardURL.Path = "/" + strings.TrimLeft("/"+strings.Trim(backendPath, "/")+"/"+strings.TrimLeft(proxyPath, "/"), "/")
+	forwardURL.Path = path.Join(backendPath, proxyPath)
 
 	if rl.Upstream.StripPath != "" {
 		forwardURL.Path = strings.Replace(forwardURL.Path, "/"+strings.Trim(rl.Upstream.StripPath, "/"), "", 1)
