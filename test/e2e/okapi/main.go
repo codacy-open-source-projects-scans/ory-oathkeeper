@@ -11,7 +11,6 @@ import (
 	jwtmiddleware "github.com/auth0/go-jwt-middleware/v2"
 	"github.com/auth0/go-jwt-middleware/v2/jwks"
 	"github.com/auth0/go-jwt-middleware/v2/validator"
-	"github.com/julienschmidt/httprouter"
 	"github.com/urfave/negroni"
 
 	"github.com/ory/oathkeeper/x"
@@ -41,9 +40,9 @@ func init() {
 var jwtm = jwtmiddleware.New(jwtValidator.ValidateToken)
 
 func main() {
-	router := httprouter.New()
+	router := http.NewServeMux()
 
-	router.GET("/jwt", jwtHandler)
+	router.HandleFunc("GET /jwt", jwtHandler)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -65,6 +64,6 @@ func main() {
 	}
 }
 
-func jwtHandler(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
+func jwtHandler(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }

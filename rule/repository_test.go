@@ -13,13 +13,12 @@ import (
 	"testing"
 
 	"github.com/go-faker/faker/v4"
-	_ "github.com/go-sql-driver/mysql"
-	_ "github.com/lib/pq"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/ory/x/logrusx"
+	"github.com/ory/x/otelx"
 
 	"github.com/ory/oathkeeper/driver/configuration"
 )
@@ -39,6 +38,7 @@ func (v *validatorNoop) Validate(*Rule) error {
 type mockRepositoryRegistry struct {
 	v            validatorNoop
 	loggerCalled int
+	t            *testing.T
 }
 
 func (r *mockRepositoryRegistry) RuleValidator() Validator {
@@ -47,8 +47,10 @@ func (r *mockRepositoryRegistry) RuleValidator() Validator {
 
 func (r *mockRepositoryRegistry) Logger() *logrusx.Logger {
 	r.loggerCalled++
-	return logrusx.New("", "")
+	return logrusx.NewT(r.t)
 }
+
+func (r *mockRepositoryRegistry) Tracer(_ context.Context) *otelx.Tracer { return otelx.NewNoop() }
 
 func init() {
 	err := faker.AddProvider("urlProvider", func(v reflect.Value) (interface{}, error) {
@@ -56,7 +58,7 @@ func init() {
 		if rand.Intn(2) == 0 { //nolint:gosec // math/rand acceptable for test shuffling
 			m = new(Match)
 		} else {
-			m = new(MatchGRPC)
+			m = new(MatchRPC)
 		}
 		err := faker.FakeData(m)
 		return m, err
@@ -68,7 +70,7 @@ func init() {
 
 func TestRepository(t *testing.T) {
 	for name, repo := range map[string]Repository{
-		"memory": NewRepositoryMemory(new(mockRepositoryRegistry)),
+		"memory": NewRepositoryMemory(&mockRepositoryRegistry{t: t}),
 	} {
 		t.Run(fmt.Sprintf("repository=%s/case=valid rule", name), func(t *testing.T) {
 			assert.Error(t, repo.ReadyChecker(new(http.Request)))
@@ -137,7 +139,7 @@ func TestRepository(t *testing.T) {
 	}
 
 	expectedErr := errors.New("this is a forced test error and can be ignored")
-	mr := &mockRepositoryRegistry{v: validatorNoop{ret: expectedErr}}
+	mr := &mockRepositoryRegistry{t: t, v: validatorNoop{ret: expectedErr}}
 	for name, repo := range map[string]Repository{
 		"memory": NewRepositoryMemory(mr),
 	} {

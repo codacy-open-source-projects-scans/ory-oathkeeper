@@ -14,6 +14,8 @@ import (
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urfave/negroni"
+
+	"github.com/ory/x/httprouterx"
 )
 
 type HTTPMetrics struct {
@@ -40,14 +42,11 @@ func NewHTTPMetrics(app, metricsPrefix, version, hash, date string) *HTTPMetrics
 	}
 
 	pm := &HTTPMetrics{
-		responseTime: prometheus.NewHistogramVec(
-			prometheus.HistogramOpts{
-				Name:        metricsPrefix + "response_time_seconds",
-				Help:        "Description",
-				ConstLabels: labels,
-			},
-			[]string{"endpoint"},
-		),
+		responseTime: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:        metricsPrefix + "response_time_seconds",
+			Help:        "Description",
+			ConstLabels: labels,
+		}, []string{"endpoint"}),
 		totalRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name:        metricsPrefix + "requests_total",
 			Help:        "number of requests",
@@ -111,17 +110,25 @@ func (h *HTTPMetrics) ServeHTTP(rw http.ResponseWriter, r *http.Request, next ht
 	rr := negroni.NewResponseWriter(rw)
 	start := time.Now()
 
-	next(rr, r)
+	var pattern string
+	next(rr, httprouterx.WithAfterMatchHook(r, func(r *http.Request) {
+		pattern = r.Pattern
+	}))
 
 	latency := time.Since(start)
 	code := StatusCodeToString(rr.Status())
 	method := sanitizeMethod(r.Method)
-	endpoint := GetLabelForPattern(r.Pattern)
+	endpoint := getLabelForPattern(pattern)
 
+	// Latency histograms and request counters carry trace exemplars so that
+	// dashboards can link latency outliers and error spikes to traces. The
+	// request's span is still open here: the tracing middleware wraps this
+	// one.
+	ctx := r.Context()
 	h.responseSize.WithLabelValues(code, method).Observe(float64(rr.Size()))
-	h.totalRequests.WithLabelValues(code, method, endpoint).Inc()
-	h.duration.WithLabelValues(code, method, endpoint).Observe(latency.Seconds())
-	h.responseTime.WithLabelValues(endpoint).Observe(latency.Seconds())
+	AddWithExemplar(ctx, h.totalRequests.WithLabelValues(code, method, endpoint), 1)
+	ObserveWithExemplar(ctx, h.duration.WithLabelValues(code, method, endpoint), latency.Seconds())
+	ObserveWithExemplar(ctx, h.responseTime.WithLabelValues(endpoint), latency.Seconds())
 	h.requestSize.WithLabelValues(code, method).Observe(float64(computeApproximateRequestSize(r)))
 
 	statusBucket := "unknown"
@@ -136,7 +143,7 @@ func (h *HTTPMetrics) ServeHTTP(rw http.ResponseWriter, r *http.Request, next ht
 		statusBucket = "5xx"
 	}
 
-	h.handlerStatuses.WithLabelValues(r.Method, statusBucket).Inc()
+	AddWithExemplar(ctx, h.handlerStatuses.WithLabelValues(r.Method, statusBucket), 1)
 }
 
 var (
@@ -153,7 +160,7 @@ var (
 	patternLabelCache = sync.Map{}
 )
 
-func GetLabelForPattern(pattern string) string {
+func getLabelForPattern(pattern string) string {
 	if label, ok := patternLabelCache.Load(pattern); ok {
 		return label.(string)
 	}

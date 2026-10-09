@@ -18,8 +18,6 @@ import (
 
 	"net/http/httptest"
 
-	"github.com/julienschmidt/httprouter"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -29,8 +27,7 @@ import (
 
 func TestAuthenticatorBearerToken(t *testing.T) {
 	t.Parallel()
-	conf := internal.NewConfigurationWithDefaults()
-	reg := internal.NewRegistry(conf)
+	reg := internal.NewRegistry(t)
 
 	pipelineAuthenticator, err := reg.PipelineAuthenticator("bearer_token")
 	require.NoError(t, err)
@@ -39,7 +36,7 @@ func TestAuthenticatorBearerToken(t *testing.T) {
 		for k, tc := range []struct {
 			d              string
 			r              *http.Request
-			setup          func(*testing.T, *httprouter.Router)
+			setup          func(*testing.T, *http.ServeMux)
 			router         func(http.ResponseWriter, *http.Request)
 			config         json.RawMessage
 			expectErr      bool
@@ -74,8 +71,8 @@ func TestAuthenticatorBearerToken(t *testing.T) {
 			{
 				d: "should fail because session store returned 400",
 				r: &http.Request{Header: http.Header{"Authorization": {"bearer token"}}, URL: &url.URL{Path: ""}},
-				setup: func(t *testing.T, m *httprouter.Router) {
-					m.GET("/", func(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
+				setup: func(t *testing.T, m *http.ServeMux) {
+					m.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 						w.WriteHeader(400)
 					})
 				},
@@ -84,8 +81,8 @@ func TestAuthenticatorBearerToken(t *testing.T) {
 			{
 				d: "should pass because session store returned 200",
 				r: &http.Request{Header: http.Header{"Authorization": {"bearer token"}}, URL: &url.URL{Path: ""}},
-				setup: func(t *testing.T, m *httprouter.Router) {
-					m.GET("/", func(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
+				setup: func(t *testing.T, m *http.ServeMux) {
+					m.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 						w.WriteHeader(200)
 						_, _ = w.Write([]byte(`{"sub": "123", "extra": {"foo": "bar"}}`))
 					})
@@ -236,8 +233,8 @@ func TestAuthenticatorBearerToken(t *testing.T) {
 			{
 				d: "should work with nested extra keys",
 				r: &http.Request{Header: http.Header{"Authorization": {"bearer token"}}, URL: &url.URL{Path: ""}},
-				setup: func(t *testing.T, m *httprouter.Router) {
-					m.GET("/", func(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
+				setup: func(t *testing.T, m *http.ServeMux) {
+					m.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 						w.WriteHeader(200)
 						_, _ = w.Write([]byte(`{"sub": "123", "session": {"foo": "bar"}}`))
 					})
@@ -252,8 +249,8 @@ func TestAuthenticatorBearerToken(t *testing.T) {
 			{
 				d: "should work with the root key for extra and a custom subject key",
 				r: &http.Request{Header: http.Header{"Authorization": {"bearer token"}}, URL: &url.URL{Path: ""}},
-				setup: func(t *testing.T, m *httprouter.Router) {
-					m.GET("/", func(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
+				setup: func(t *testing.T, m *http.ServeMux) {
+					m.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 						w.WriteHeader(200)
 						_, _ = w.Write([]byte(`{"identity": {"id": "123"}, "session": {"foo": "bar"}}`))
 					})
@@ -268,8 +265,8 @@ func TestAuthenticatorBearerToken(t *testing.T) {
 			{
 				d: "should work with custom header forwarded",
 				r: &http.Request{Header: http.Header{"Authorization": {"bearer token"}, "X-User": {"123"}}, URL: &url.URL{Path: ""}},
-				setup: func(t *testing.T, m *httprouter.Router) {
-					m.GET("/", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+				setup: func(t *testing.T, m *http.ServeMux) {
+					m.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 						if r.Header.Get("X-User") == "" {
 							w.WriteHeader(http.StatusBadRequest)
 							return
@@ -291,7 +288,7 @@ func TestAuthenticatorBearerToken(t *testing.T) {
 				if tc.router != nil {
 					ts = httptest.NewServer(http.HandlerFunc(tc.router))
 				} else {
-					router := httprouter.New()
+					router := http.NewServeMux()
 					if tc.setup != nil {
 						tc.setup(t, router)
 					}

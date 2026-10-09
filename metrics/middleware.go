@@ -116,7 +116,7 @@ func (m *Middleware) ServeHTTP(rw http.ResponseWriter, r *http.Request, next htt
 			}
 		}
 
-		m.Prometheus.RequestDurationObserve(m.Name, requestURI, r.Method, res.Status())(latency.Seconds())
-		m.Prometheus.UpdateRequest(m.Name, requestURI, r.Method, res.Status())
+		m.Prometheus.RequestDurationObserve(r.Context(), m.Name, requestURI, r.Method, res.Status())(latency.Seconds())
+		m.Prometheus.UpdateRequest(r.Context(), m.Name, requestURI, r.Method, res.Status())
 	}
 }

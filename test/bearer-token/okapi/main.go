@@ -8,15 +8,13 @@ import (
 	"io"
 	"net/http"
 	"os"
-
-	"github.com/julienschmidt/httprouter"
 )
 
 func main() {
-	router := httprouter.New()
+	router := http.NewServeMux()
 
-	router.POST("/test", test)
-	router.GET("/session", session)
+	router.HandleFunc("POST /test", test)
+	router.HandleFunc("GET /session", session)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -33,7 +31,7 @@ func main() {
 	}
 }
 
-func test(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+func test(w http.ResponseWriter, r *http.Request) {
 	b, err := io.ReadAll(r.Body)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -47,6 +45,6 @@ func test(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func session(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+func session(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }

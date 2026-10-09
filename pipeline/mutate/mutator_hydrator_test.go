@@ -13,18 +13,16 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/julienschmidt/httprouter"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
-	"github.com/ory/oathkeeper/pipeline/authn"
-	"github.com/ory/oathkeeper/pipeline/mutate"
-	"github.com/ory/oathkeeper/rule"
 	"github.com/ory/x/configx"
 
 	"github.com/ory/oathkeeper/driver/configuration"
 	"github.com/ory/oathkeeper/internal"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/ory/oathkeeper/pipeline/authn"
+	"github.com/ory/oathkeeper/pipeline/mutate"
+	"github.com/ory/oathkeeper/rule"
 )
 
 func setExtra(key string, value interface{}) func(a *authn.AuthenticationSession) {
@@ -62,8 +60,8 @@ type routerSetupFunction func(t *testing.T) http.Handler
 
 func defaultRouterSetup(actions ...func(a *authn.AuthenticationSession)) routerSetupFunction {
 	return func(t *testing.T) http.Handler {
-		router := httprouter.New()
-		router.POST("/", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		router := http.NewServeMux()
+		router.HandleFunc("POST /", func(w http.ResponseWriter, r *http.Request) {
 			body, err := io.ReadAll(r.Body)
 			require.NoError(t, err)
 			var data authn.AuthenticationSession
@@ -131,8 +129,7 @@ func configWithRetriesForMutator(giveUpAfter, retryDelay string) func(*httptest.
 
 func TestMutatorHydrator(t *testing.T) {
 	t.Parallel()
-	conf := internal.NewConfigurationWithDefaults(configx.SkipValidation())
-	reg := internal.NewRegistry(conf)
+	reg := internal.NewRegistry(t, configx.SkipValidation())
 
 	a, err := reg.PipelineMutator("hydrator")
 	require.NoError(t, err)
@@ -207,8 +204,8 @@ func TestMutatorHydrator(t *testing.T) {
 			},
 			"Empty Response": {
 				Setup: func(t *testing.T) http.Handler {
-					router := httprouter.New()
-					router.POST("/", func(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
+					router := http.NewServeMux()
+					router.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 						w.WriteHeader(http.StatusOK)
 						_, err = w.Write([]byte(`{}`))
 						require.NoError(t, err)
@@ -246,8 +243,8 @@ func TestMutatorHydrator(t *testing.T) {
 			},
 			"Not Found": {
 				Setup: func(_ *testing.T) http.Handler {
-					router := httprouter.New()
-					router.POST("/", func(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
+					router := http.NewServeMux()
+					router.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 						w.WriteHeader(http.StatusNotFound)
 					})
 					return router
@@ -299,8 +296,8 @@ func TestMutatorHydrator(t *testing.T) {
 			},
 			"Should Replace Authn Header": {
 				Setup: func(t *testing.T) http.Handler {
-					router := httprouter.New()
-					router.POST("/", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+					router := http.NewServeMux()
+					router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 						authnHeaders := r.Header["Authentication"]
 						assert.Equal(t, len(authnHeaders), 1)
 						user, passwd, ok := r.BasicAuth()
@@ -330,8 +327,8 @@ func TestMutatorHydrator(t *testing.T) {
 			},
 			"Pass Query Parameters": {
 				Setup: func(t *testing.T) http.Handler {
-					router := httprouter.New()
-					router.POST("/", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+					router := http.NewServeMux()
+					router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 						q := r.URL.Query()
 						assert.Equal(t, len(q), 2)
 						assert.Equal(t, q["a"], []string{"b"})
@@ -385,7 +382,7 @@ func TestMutatorHydrator(t *testing.T) {
 			{enabled: true, shouldPass: true, apiUrl: "http://api/bar"},
 		} {
 			t.Run(fmt.Sprintf("case=%d", k), func(t *testing.T) {
-				conf.SetForTest(t, configuration.MutatorHydratorIsEnabled, testCase.enabled)
+				reg.Config().SetForTest(t, configuration.MutatorHydratorIsEnabled, testCase.enabled)
 
 				err := a.Validate(json.RawMessage(`{"api":{"url":"` + testCase.apiUrl + `"}}`))
 				if testCase.shouldPass {

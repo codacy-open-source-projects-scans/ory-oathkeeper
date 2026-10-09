@@ -4,26 +4,29 @@
 package proxy_test
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/ory/herodot"
 	"github.com/ory/x/configx"
 	"github.com/ory/x/logrusx"
 
+	"github.com/ory/oathkeeper/driver"
 	"github.com/ory/oathkeeper/driver/configuration"
 	"github.com/ory/oathkeeper/internal"
 	"github.com/ory/oathkeeper/pipeline/authn"
-	"github.com/ory/oathkeeper/x"
-
-	"github.com/stretchr/testify/require"
-
 	"github.com/ory/oathkeeper/rule"
+	"github.com/ory/oathkeeper/x"
 )
 
 var TestHeader = http.Header{"Test-Header": []string{"Test-Value"}}
@@ -39,7 +42,7 @@ func TestHandleError(t *testing.T) {
 		rule       *rule.Rule
 		header     http.Header
 		assert     func(t *testing.T, w *httptest.ResponseRecorder)
-		setup      func(t *testing.T, config configuration.Provider)
+		setup      func(t *testing.T, config configuration.Configuration)
 		configOpts []configx.OptionModifier
 	}{
 		{
@@ -53,7 +56,7 @@ func TestHandleError(t *testing.T) {
 		{
 			d:        "should return a 500 error when no handler is enabled",
 			inputErr: herodot.ErrNotFound(),
-			setup: func(t *testing.T, config configuration.Provider) {
+			setup: func(t *testing.T, config configuration.Configuration) {
 				config.SetForTest(t, configuration.ErrorsJSONIsEnabled, false)
 			},
 			assert: func(t *testing.T, w *httptest.ResponseRecorder) {
@@ -63,7 +66,7 @@ func TestHandleError(t *testing.T) {
 		{
 			d:        "should return the found response",
 			inputErr: herodot.ErrUnauthorized(),
-			setup: func(t *testing.T, config configuration.Provider) {
+			setup: func(t *testing.T, config configuration.Configuration) {
 				config.SetForTest(t, configuration.ErrorsRedirectIsEnabled, true)
 			},
 			rule: &rule.Rule{
@@ -80,7 +83,7 @@ func TestHandleError(t *testing.T) {
 		{
 			d:        "should return a JSON error because the error is not unauthorized and JSON is the default",
 			inputErr: herodot.ErrNotFound(),
-			setup: func(t *testing.T, config configuration.Provider) {
+			setup: func(t *testing.T, config configuration.Configuration) {
 				config.SetForTest(t, configuration.ErrorsRedirectIsEnabled, true)
 				config.SetForTest(t, configuration.ErrorsHandlers+".redirect.config.to", "http://test/test")
 			},
@@ -98,7 +101,7 @@ func TestHandleError(t *testing.T) {
 		{
 			d:        "should pick the appropriate (json) error handler for the request when multiple are configured",
 			inputErr: herodot.ErrNotFound(),
-			setup: func(t *testing.T, config configuration.Provider) {
+			setup: func(t *testing.T, config configuration.Configuration) {
 				config.SetForTest(t, configuration.ErrorsRedirectIsEnabled, true)
 			},
 			header: map[string][]string{"Accept": {"application/json"}},
@@ -119,7 +122,7 @@ func TestHandleError(t *testing.T) {
 		{
 			d:        "should redirect to the specified endpoint by picking the appropriate error handler (redirect)",
 			inputErr: herodot.ErrUnauthorized(),
-			setup: func(t *testing.T, config configuration.Provider) {
+			setup: func(t *testing.T, config configuration.Configuration) {
 				config.SetForTest(t, configuration.ErrorsRedirectIsEnabled, true)
 			},
 			header: map[string][]string{"Accept": {"application/xml"}},
@@ -140,7 +143,7 @@ func TestHandleError(t *testing.T) {
 		{
 			d:        "should respond with the appropriate fallback handler (here www_authenticate)",
 			inputErr: herodot.ErrUnauthorized(),
-			setup: func(t *testing.T, config configuration.Provider) {
+			setup: func(t *testing.T, config configuration.Configuration) {
 				config.SetForTest(t, configuration.ErrorsRedirectIsEnabled, true)
 				config.SetForTest(t, configuration.ErrorsWWWAuthenticateIsEnabled, true)
 				config.SetForTest(t, configuration.ErrorsFallback, []string{"www_authenticate", "json"})
@@ -232,13 +235,10 @@ errors:
 		},
 	} {
 		t.Run(fmt.Sprintf("case=%d/description=%s", k, tc.d), func(t *testing.T) {
-			conf := internal.NewConfigurationWithDefaults(
-				append(tc.configOpts, configx.SkipValidation())...,
-			)
-			reg := internal.NewRegistry(conf)
+			reg := internal.NewRegistry(t, append(tc.configOpts, configx.SkipValidation())...)
 
 			if tc.setup != nil {
-				tc.setup(t, conf)
+				tc.setup(t, reg.Config())
 			}
 
 			r := httptest.NewRequest("GET", "/test", nil)
@@ -254,7 +254,7 @@ errors:
 func TestRequestHandler(t *testing.T) {
 	for k, tc := range []struct {
 		d         string
-		setup     func(t *testing.T, config configuration.Provider)
+		setup     func(t *testing.T, config configuration.Configuration)
 		rule      rule.Rule
 		r         *http.Request
 		expectErr bool
@@ -271,7 +271,7 @@ func TestRequestHandler(t *testing.T) {
 		},
 		{
 			d: "should fail because the rule is missing authn, authz, and mutator even when some pipelines are enabled",
-			setup: func(t *testing.T, config configuration.Provider) {
+			setup: func(t *testing.T, config configuration.Configuration) {
 				config.SetForTest(t, configuration.AuthenticatorNoopIsEnabled, true)
 				config.SetForTest(t, configuration.AuthorizerAllowIsEnabled, true)
 				config.SetForTest(t, configuration.MutatorNoopIsEnabled, true)
@@ -286,7 +286,7 @@ func TestRequestHandler(t *testing.T) {
 		},
 		{
 			d: "should pass",
-			setup: func(t *testing.T, config configuration.Provider) {
+			setup: func(t *testing.T, config configuration.Configuration) {
 				config.SetForTest(t, configuration.AuthenticatorNoopIsEnabled, true)
 				config.SetForTest(t, configuration.AuthorizerAllowIsEnabled, true)
 				config.SetForTest(t, configuration.MutatorNoopIsEnabled, true)
@@ -301,7 +301,7 @@ func TestRequestHandler(t *testing.T) {
 		},
 		{
 			d: "should fail when authn is set but not authz nor mutator",
-			setup: func(t *testing.T, config configuration.Provider) {
+			setup: func(t *testing.T, config configuration.Configuration) {
 				config.SetForTest(t, configuration.AuthenticatorAnonymousIsEnabled, true)
 				config.SetForTest(t, configuration.AuthorizerAllowIsEnabled, true)
 				config.SetForTest(t, configuration.MutatorNoopIsEnabled, true)
@@ -316,7 +316,7 @@ func TestRequestHandler(t *testing.T) {
 		},
 		{
 			d: "should fail when authn, authz is set but not mutator",
-			setup: func(t *testing.T, config configuration.Provider) {
+			setup: func(t *testing.T, config configuration.Configuration) {
 				config.SetForTest(t, configuration.AuthenticatorAnonymousIsEnabled, true)
 				config.SetForTest(t, configuration.AuthorizerAllowIsEnabled, true)
 				config.SetForTest(t, configuration.MutatorNoopIsEnabled, true)
@@ -331,7 +331,7 @@ func TestRequestHandler(t *testing.T) {
 		},
 		{
 			d: "should fail when authn is invalid because not enabled",
-			setup: func(t *testing.T, config configuration.Provider) {
+			setup: func(t *testing.T, config configuration.Configuration) {
 				config.SetForTest(t, configuration.AuthenticatorAnonymousIsEnabled, false)
 				config.SetForTest(t, configuration.AuthorizerAllowIsEnabled, true)
 				config.SetForTest(t, configuration.MutatorNoopIsEnabled, true)
@@ -346,7 +346,7 @@ func TestRequestHandler(t *testing.T) {
 		},
 		{
 			d: "should fail when authz is invalid because not enabled",
-			setup: func(t *testing.T, config configuration.Provider) {
+			setup: func(t *testing.T, config configuration.Configuration) {
 				config.SetForTest(t, configuration.AuthenticatorAnonymousIsEnabled, true)
 				config.SetForTest(t, configuration.AuthorizerAllowIsEnabled, false)
 				config.SetForTest(t, configuration.MutatorNoopIsEnabled, true)
@@ -361,7 +361,7 @@ func TestRequestHandler(t *testing.T) {
 		},
 		{
 			d: "should fail when mutator is invalid because not enabled",
-			setup: func(t *testing.T, config configuration.Provider) {
+			setup: func(t *testing.T, config configuration.Configuration) {
 				config.SetForTest(t, configuration.AuthenticatorAnonymousIsEnabled, true)
 				config.SetForTest(t, configuration.AuthorizerAllowIsEnabled, true)
 				config.SetForTest(t, configuration.MutatorNoopIsEnabled, false)
@@ -376,7 +376,7 @@ func TestRequestHandler(t *testing.T) {
 		},
 		{
 			d: "should fail when authn does not exist",
-			setup: func(t *testing.T, config configuration.Provider) {
+			setup: func(t *testing.T, config configuration.Configuration) {
 				config.SetForTest(t, configuration.AuthenticatorAnonymousIsEnabled, true)
 				config.SetForTest(t, configuration.AuthorizerAllowIsEnabled, true)
 				config.SetForTest(t, configuration.MutatorNoopIsEnabled, true)
@@ -391,7 +391,7 @@ func TestRequestHandler(t *testing.T) {
 		},
 		{
 			d: "should fail when authz does not exist",
-			setup: func(t *testing.T, config configuration.Provider) {
+			setup: func(t *testing.T, config configuration.Configuration) {
 				config.SetForTest(t, configuration.AuthenticatorAnonymousIsEnabled, true)
 				config.SetForTest(t, configuration.AuthorizerAllowIsEnabled, true)
 				config.SetForTest(t, configuration.MutatorNoopIsEnabled, true)
@@ -406,7 +406,7 @@ func TestRequestHandler(t *testing.T) {
 		},
 		{
 			d: "should fail when mutator does not exist",
-			setup: func(t *testing.T, config configuration.Provider) {
+			setup: func(t *testing.T, config configuration.Configuration) {
 				config.SetForTest(t, configuration.AuthenticatorAnonymousIsEnabled, true)
 				config.SetForTest(t, configuration.AuthorizerAllowIsEnabled, true)
 				config.SetForTest(t, configuration.MutatorNoopIsEnabled, true)
@@ -421,16 +421,10 @@ func TestRequestHandler(t *testing.T) {
 		},
 	} {
 		t.Run(fmt.Sprintf("case=%d/description=%s", k, tc.d), func(t *testing.T) {
-			// log, hook := test.NewNullLogger()
-			l := logrusx.New("", "" /*, logrusx.UseLogger(log), logrusx.WithHook(hook)*/)
-			l.Info("testing!!!")
-			conf := internal.NewConfigurationWithDefaults(
-				configx.WithLogger(l),
-			)
-			reg := internal.NewRegistry(conf)
+			reg := internal.NewRegistry(t)
 
 			if tc.setup != nil {
-				tc.setup(t, conf)
+				tc.setup(t, reg.Config())
 			}
 
 			_, err := reg.ProxyRequestHandler().HandleRequest(tc.r, &tc.rule)
@@ -537,8 +531,7 @@ func TestInitializeSession(t *testing.T) {
 		},
 	} {
 		t.Run(fmt.Sprintf("description=%s", tc.desc), func(t *testing.T) {
-			conf := internal.NewConfigurationWithDefaults(configx.WithValue(configuration.AccessRuleMatchingStrategy, tc.strategy))
-			reg := internal.NewRegistry(conf)
+			reg := internal.NewRegistry(t, configx.WithValue(configuration.AccessRuleMatchingStrategy, tc.strategy))
 
 			session := reg.ProxyRequestHandler().InitializeAuthnSession(
 				newTestRequest(tc.url),
@@ -550,4 +543,37 @@ func TestInitializeSession(t *testing.T) {
 			assert.EqualValues(t, tc.expectContext, session.MatchContext)
 		})
 	}
+}
+
+func TestHandleRequestLoggingFields(t *testing.T) {
+	conf := internal.NewConfigurationWithDefaults(t)
+
+	var buf bytes.Buffer
+	l := logrusx.NewT(t, logrusx.ForceFormat("json"), logrusx.ForceLevel(logrus.DebugLevel))
+	l.Logrus().Out = &buf
+
+	reg := driver.NewRegistryMemory(conf, l)
+
+	traceID, err := trace.TraceIDFromHex("4bf92f3577b34da6a3ce929d0e0e4736")
+	require.NoError(t, err)
+	spanID, err := trace.SpanIDFromHex("00f067aa0ba902b7")
+	require.NoError(t, err)
+	spanCtx := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    traceID,
+		SpanID:     spanID,
+		TraceFlags: trace.FlagsSampled,
+	})
+	ctx := trace.ContextWithSpanContext(context.Background(), spanCtx)
+
+	// Trigger the "no authentication handler was set" warning to produce a log line
+	// containing the rule_id and otel trace fields.
+	r := newTestRequest("http://localhost").WithContext(ctx)
+	rl := &rule.Rule{ID: "my-rule-id"}
+	_, err = reg.ProxyRequestHandler().HandleRequest(r, rl)
+	require.Error(t, err)
+
+	out := buf.String()
+	assert.Contains(t, out, `"rule_id":"my-rule-id"`, out)
+	assert.Contains(t, out, `"trace_id":"4bf92f3577b34da6a3ce929d0e0e4736"`, out)
+	assert.Contains(t, out, `"span_id":"00f067aa0ba902b7"`, out)
 }

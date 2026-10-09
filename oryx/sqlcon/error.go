@@ -10,9 +10,9 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/lib/pq"
 	"github.com/pkg/errors"
 	"google.golang.org/grpc/codes"
+	"modernc.org/sqlite"
 
 	"github.com/ory/herodot"
 )
@@ -91,14 +91,11 @@ func HandleError(err error) error {
 		SQLState() string
 	}
 
-	if errors.Is(err, sql.ErrNoRows) {
+	if stderrs.Is(err, sql.ErrNoRows) {
 		return errors.WithStack(ErrNoRows())
 	}
 	if e, ok := stderrs.AsType[stater](err); ok {
 		return errors.WithStack(handlePostgres(err, e.SQLState()))
-	}
-	if e, ok := stderrs.AsType[*pq.Error](err); ok {
-		return errors.WithStack(handlePostgres(err, string(e.Code)))
 	}
 	if e, ok := stderrs.AsType[*pgconn.PgError](err); ok {
 		return errors.WithStack(handlePostgres(err, e.Code))
@@ -111,12 +108,43 @@ func HandleError(err error) error {
 			return errors.WithStack(ErrNoSuchTable().WithWrap(e))
 		case 1054: // https://dev.mysql.com/doc/mysql-errors/8.0/en/server-error-reference.html#error_er_bad_field_error
 			return errors.WithStack(ErrNoSuchColumn().WithWrap(e))
+		case 1213: // https://dev.mysql.com/doc/mysql-errors/8.0/en/server-error-reference.html#error_er_lock_deadlock
+			return errors.WithStack(ErrConcurrentUpdate().WithWrap(e))
 		}
 	}
-
-	if err := handleSqlite(err); err != nil {
-		return errors.WithStack(err)
+	if e, ok := stderrs.AsType[*sqlite.Error](err); ok {
+		return handleSqlite(e, err)
 	}
 
 	return errors.WithStack(err)
+}
+
+// IsForeignKeyViolation reports whether err is a foreign-key constraint
+// violation, e.g. deleting a parent row that a child row still references
+// under ON DELETE RESTRICT or NO ACTION.
+func IsForeignKeyViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	type stater = interface {
+		error
+		SQLState() string
+	}
+
+	if e, ok := stderrs.AsType[stater](err); ok {
+		return e.SQLState() == "23503" // "foreign_key_violation" in Postgres / CockroachDB
+	}
+	if e, ok := stderrs.AsType[*pgconn.PgError](err); ok {
+		return e.Code == "23503"
+	}
+	if e, ok := stderrs.AsType[*mysql.MySQLError](err); ok {
+		// 1451: cannot delete or update a parent row (a foreign key constraint fails).
+		// https://dev.mysql.com/doc/mysql-errors/8.0/en/server-error-reference.html#error_er_row_is_referenced_2
+		return e.Number == 1451
+	}
+	if e, ok := stderrs.AsType[*sqlite.Error](err); ok {
+		return isSqliteForeignKeyViolation(e)
+	}
+	return false
 }

@@ -36,7 +36,7 @@ import (
 
 const (
 	KiB                = 1024
-	jsonnetOutputLimit = 512 * KiB
+	jsonnetOutputLimit = 256 * KiB
 	jsonnetErrLimit    = 1 * KiB
 )
 
@@ -155,10 +155,10 @@ func newWorker(ctx context.Context) (_ worker, err error) {
 
 	span.SetAttributes(semconv.ProcessPID(cmd.Process.Pid))
 
-	scan := func(c chan<- string, r io.Reader) {
+	scan := func(c chan<- string, r io.Reader, maxTokenSize int) {
 		defer close(c)
-		// NOTE: `bufio.Scanner` has its own internal limit of 64 KiB.
 		scanner := bufio.NewScanner(r)
+		scanner.Buffer(make([]byte, 0, 64*KiB), maxTokenSize)
 
 		scanner.Split(splitNull)
 		for scanner.Scan() {
@@ -169,9 +169,9 @@ func newWorker(ctx context.Context) (_ worker, err error) {
 		}
 	}
 	out := make(chan string, 1)
-	go scan(out, stdout)
+	go scan(out, stdout, jsonnetOutputLimit)
 	errs := make(chan string, 1)
-	go scan(errs, stderr)
+	go scan(errs, stderr, jsonnetErrLimit)
 
 	w := worker{
 		cmd:    cmd,
@@ -199,6 +199,29 @@ func (w worker) eval(ctx context.Context, processParams []byte) (output string, 
 	ctx, span := tracer.Start(ctx, "jsonnetsecure.worker.eval", trace.WithAttributes(
 		semconv.ProcessPID(w.cmd.Process.Pid)))
 	defer otelx.End(span, &err)
+
+	// The worker is exclusively acquired, so the schedstat delta over this
+	// evaluation is attributable to it. cpu_time_us is time actually spent on
+	// a CPU; runqueue_wait_us is time runnable but waiting for one. Span wall
+	// time far exceeding their sum means the process was not even runnable,
+	// e.g. dequeued by cgroup CPU throttling.
+	//
+	// A kernel without CONFIG_SCHED_INFO reports "0 0 0" instead of failing
+	// the read. The worker has already spent CPU time on its warm-up
+	// evaluation, so a zero cpuTime means the fields are dead — skip them
+	// rather than record misleading zeros.
+	if before, ok := readSchedstat(w.cmd.Process.Pid); ok && before.cpuTime > 0 {
+		defer func() {
+			after, ok := readSchedstat(w.cmd.Process.Pid)
+			if !ok {
+				return
+			}
+			span.SetAttributes(
+				attribute.Int64("jsonnet.worker.cpu_time_us", (after.cpuTime-before.cpuTime).Microseconds()),
+				attribute.Int64("jsonnet.worker.runqueue_wait_us", (after.runqueueWait-before.runqueueWait).Microseconds()),
+			)
+		}()
+	}
 
 	select {
 	case <-ctx.Done():

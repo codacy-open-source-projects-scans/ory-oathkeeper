@@ -3,48 +3,51 @@
 
 package middleware_test
 
-//go:generate mockgen -destination=grpc_mock_server_test.go -package=middleware_test google.golang.org/grpc/interop/grpc_testing TestServiceServer
+//go:generate go tool mockgen -destination=grpc_mock_server_test.go -package=middleware_test github.com/ory/rpctest/gen/go/ory/rpctest TestServiceServer
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
-	"github.com/golang/mock/gomock"
+	"connectrpc.com/connect"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/interop/grpc_testing"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
-	"google.golang.org/grpc/test/bufconn"
 
-	"github.com/ory/oathkeeper/driver"
+	"github.com/ory/rpctest/gen/go/ory/rpctest"
+
 	"github.com/ory/oathkeeper/driver/configuration"
 	"github.com/ory/oathkeeper/middleware"
 	"github.com/ory/oathkeeper/rule"
 )
 
-func testClient(t *testing.T, l *bufconn.Listener, dialOpts ...grpc.DialOption) grpc_testing.TestServiceClient {
-	conn, err := grpc.Dial("bufnet", //nolint:staticcheck // grpc.Dial is adequate for tests in grpc v1.x
-		append(dialOpts,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			grpc.WithAuthority("myproject.apis.ory.sh"),
-			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return l.Dial() }),
-		)...,
-	)
+func testClient(t *testing.T, ts *httptest.Server, bearer *string) rpctest.TestServiceClient {
+	certs := x509.NewCertPool()
+	certs.AddCert(ts.Certificate())
+	dialOpts := []grpc.DialOption{
+		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{RootCAs: certs})),
+		grpc.WithAuthority("myproject.example.com"),
+	}
+	if bearer != nil {
+		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(testToken(*bearer)))
+	}
+	conn, err := grpc.Dial(ts.Listener.Addr().String(), dialOpts...) //nolint:staticcheck // grpc.Dial is adequate for tests in grpc v1.x
 	require.NoError(t, err)
-	t.Cleanup(func() { conn.Close() }) //nolint:errcheck,gosec // cleanup best effort
+	t.Cleanup(func() { _ = conn.Close() })
 
-	return grpc_testing.NewTestServiceClient(conn)
+	return rpctest.NewTestServiceClient(conn)
 }
 
 func testTokenCheckServer(t *testing.T) *httptest.Server {
@@ -56,22 +59,10 @@ func testTokenCheckServer(t *testing.T) *httptest.Server {
 				return
 			}
 			t.Logf("allowed request %+v", r)
-			io.WriteString(w, "{}") //nolint:errcheck,gosec // best-effort response write
+			_, _ = io.WriteString(w, "{}")
 		}))
 	t.Cleanup(s.Close)
 	return s
-}
-
-func writeTestConfig(t *testing.T, pattern string, content string) string {
-	f, err := os.CreateTemp(t.TempDir(), pattern)
-	if err != nil {
-		t.Error(err)
-		return ""
-	}
-	defer f.Close()            //nolint:errcheck
-	io.WriteString(f, content) //nolint:errcheck,gosec // helper ignores write errors
-
-	return f.Name()
 }
 
 type testToken string
@@ -83,18 +74,16 @@ func (t testToken) RequireTransportSecurity() bool { return false }
 
 type upstream struct {
 	*MockTestServiceServer
-	grpc_testing.UnsafeTestServiceServer
+	rpctest.UnsafeTestServiceServer
 }
 
-func TestMiddleware(t *testing.T) {
-	ctx := context.Background()
-
+func TestGRPCMiddleware(t *testing.T) {
 	tokenCheckServer := testTokenCheckServer(t)
 
 	ctrl := gomock.NewController(t)
 	upstream := upstream{MockTestServiceServer: NewMockTestServiceServer(ctrl)}
 
-	config := writeTestConfig(t, "config-*.yaml", fmt.Sprintf(`
+	config := writeTestConfigf(t, `
 authenticators:
   noop:
     enabled: true
@@ -107,45 +96,40 @@ authenticators:
 authorizers:
   allow:
     enabled: true
+  deny:
+    enabled: true
 mutators:
   noop:
     enabled: true
-`, tokenCheckServer.URL))
+`, tokenCheckServer.URL)
 
-	regPtr := new(driver.Registry)
-	mw, err := middleware.New(ctx,
-		middleware.WithConfigFile(config),
-		middleware.WithRegistry(regPtr),
-	)
+	mw, err := middleware.New(t.Context(), middleware.WithConfigFile(config))
 	require.NoError(t, err)
-	reg := *regPtr
+	reg := mw.Registry()
 
-	l := bufconn.Listen(1024 * 1024)
 	s := grpc.NewServer(
 		grpc.UnaryInterceptor(mw.UnaryInterceptor()),
 		grpc.StreamInterceptor(mw.StreamInterceptor()),
 	)
-	grpc_testing.RegisterTestServiceServer(s, upstream)
-	go func() {
-		if err := s.Serve(l); err != nil {
-			t.Logf("Server exited with error: %v", err)
-		}
-	}()
-	t.Cleanup(s.Stop)
+	rpctest.RegisterTestServiceServer(s, upstream)
+	ts := httptest.NewUnstartedServer(s)
+	ts.EnableHTTP2 = true
+	ts.StartTLS()
+	t.Cleanup(ts.Close)
 
 	upstream.EXPECT().
-		EmptyCall(gomock.Any(), gomock.Any()).
+		Unary(gomock.Any(), gomock.Any()).
 		AnyTimes().
-		Return(&grpc_testing.Empty{}, nil)
+		Return(&rpctest.UnaryResponse{}, nil)
 
 	cases := []struct {
-		name     string
-		rules    map[configuration.MatchingStrategy][]rule.Rule
-		dialOpts []grpc.DialOption
-		assert   assert.ErrorAssertionFunc
+		name   string
+		rules  map[configuration.MatchingStrategy][]rule.Rule
+		bearer *string
+		assert assert.ErrorAssertionFunc
 	}{
 		{
-			name: "should fail on empty ruleset",
+			name: "should deny on empty ruleset",
 			rules: map[configuration.MatchingStrategy][]rule.Rule{
 				configuration.Regexp: {},
 				configuration.Glob:   {},
@@ -156,18 +140,18 @@ mutators:
 			name: "should succeed on matching rule",
 			rules: map[configuration.MatchingStrategy][]rule.Rule{
 				configuration.Regexp: {{
-					Match: &rule.MatchGRPC{
-						Authority:  "<([0-9a-zA-Z\\-]+)>.apis.ory.sh",
-						FullMethod: "grpc.testing.TestService/EmptyCall",
+					Match: &rule.MatchRPC{
+						Authority:  "<([0-9a-zA-Z\\-]+)>.example.com",
+						FullMethod: "ory.rpctest.TestService/Unary",
 					},
 					Authenticators: []rule.Handler{{Handler: "anonymous"}},
 					Authorizer:     rule.Handler{Handler: "allow"},
 					Mutators:       []rule.Handler{{Handler: "noop"}},
 				}},
 				configuration.Glob: {{
-					Match: &rule.MatchGRPC{
-						Authority:  "<**>.apis.ory.sh",
-						FullMethod: "grpc.testing.TestService/EmptyCall",
+					Match: &rule.MatchRPC{
+						Authority:  "<**>.example.com",
+						FullMethod: "ory.rpctest.TestService/Unary",
 					},
 					Authenticators: []rule.Handler{{Handler: "anonymous"}},
 					Authorizer:     rule.Handler{Handler: "allow"},
@@ -177,21 +161,45 @@ mutators:
 			assert: assert.NoError,
 		},
 		{
+			name: "should block on matching rule when authorizer denies",
+			rules: map[configuration.MatchingStrategy][]rule.Rule{
+				configuration.Regexp: {{
+					Match: &rule.MatchRPC{
+						Authority:  "<([0-9a-zA-Z\\-]+)>.example.com",
+						FullMethod: "ory.rpctest.TestService/Unary",
+					},
+					Authenticators: []rule.Handler{{Handler: "anonymous"}},
+					Authorizer:     rule.Handler{Handler: "deny"},
+					Mutators:       []rule.Handler{{Handler: "noop"}},
+				}},
+				configuration.Glob: {{
+					Match: &rule.MatchRPC{
+						Authority:  "<**>.example.com",
+						FullMethod: "ory.rpctest.TestService/Unary",
+					},
+					Authenticators: []rule.Handler{{Handler: "anonymous"}},
+					Authorizer:     rule.Handler{Handler: "deny"},
+					Mutators:       []rule.Handler{{Handler: "noop"}},
+				}},
+			},
+			assert: assertErrDenied,
+		},
+		{
 			name: "should succeed on matching rule with wildcard",
 			rules: map[configuration.MatchingStrategy][]rule.Rule{
 				configuration.Regexp: {{
-					Match: &rule.MatchGRPC{
+					Match: &rule.MatchRPC{
 						Authority:  "<.*>",
-						FullMethod: "<.*>Empty<.*>",
+						FullMethod: "<.*>U<.*>",
 					},
 					Authenticators: []rule.Handler{{Handler: "anonymous"}},
 					Authorizer:     rule.Handler{Handler: "allow"},
 					Mutators:       []rule.Handler{{Handler: "noop"}},
 				}},
 				configuration.Glob: {{
-					Match: &rule.MatchGRPC{
-						Authority:  "<**>.apis.ory.sh",
-						FullMethod: "grpc.testing.TestService/Empty<**>",
+					Match: &rule.MatchRPC{
+						Authority:  "<**>.example.com",
+						FullMethod: "ory.rpctest.TestService/U<**>",
 					},
 					Authenticators: []rule.Handler{{Handler: "anonymous"}},
 					Authorizer:     rule.Handler{Handler: "allow"},
@@ -204,18 +212,18 @@ mutators:
 			name: "should fail on mis-matching rule with wildcard",
 			rules: map[configuration.MatchingStrategy][]rule.Rule{
 				configuration.Regexp: {{
-					Match: &rule.MatchGRPC{
-						Authority:  "<[0-9a-zA-Z]+>.apis.ory.sh",
-						FullMethod: "grpc.testing.TestService/Empty<[a-zA-Z]+>-mismatch",
+					Match: &rule.MatchRPC{
+						Authority:  "<[0-9a-zA-Z]+>.example.com",
+						FullMethod: "ory.rpctest.TestService/U<[a-zA-Z]+>-mismatch",
 					},
 					Authenticators: []rule.Handler{{Handler: "anonymous"}},
 					Authorizer:     rule.Handler{Handler: "allow"},
 					Mutators:       []rule.Handler{{Handler: "noop"}},
 				}},
 				configuration.Glob: {{
-					Match: &rule.MatchGRPC{
-						Authority:  "<**>.apis.ory.sh",
-						FullMethod: "grpc.testing.TestService/Empty<**>-mismatch",
+					Match: &rule.MatchRPC{
+						Authority:  "<**>.example.com",
+						FullMethod: "ory.rpctest.TestService/U<**>-mismatch",
 					},
 					Authenticators: []rule.Handler{{Handler: "anonymous"}},
 					Authorizer:     rule.Handler{Handler: "allow"},
@@ -225,12 +233,12 @@ mutators:
 			assert: assertErrDenied,
 		},
 		{
-			name: "should fail because not a gRPC rule",
+			name: "should fail because not an rpc rule",
 			rules: map[configuration.MatchingStrategy][]rule.Rule{
 				configuration.Regexp: {{
 					Match: &rule.Match{
 						Methods: []string{"POST"},
-						URL:     "grpc://<[0-9a-zA-Z]+>.apis.ory.sh/grpc.testing.TestService/EmptyCall",
+						URL:     "rpc://<[0-9a-zA-Z]+>.example.com/ory.rpctest.TestService/Unary",
 					},
 					Authenticators: []rule.Handler{{Handler: "anonymous"}},
 					Authorizer:     rule.Handler{Handler: "allow"},
@@ -239,7 +247,7 @@ mutators:
 				configuration.Glob: {{
 					Match: &rule.Match{
 						Methods: []string{"POST"},
-						URL:     "grpc://<**>.apis.ory.sh/grpc.testing.TestService/EmptyCall",
+						URL:     "rpc://<**>.example.com/ory.rpctest.TestService/Unary",
 					},
 					Authenticators: []rule.Handler{{Handler: "anonymous"}},
 					Authorizer:     rule.Handler{Handler: "allow"},
@@ -252,18 +260,18 @@ mutators:
 			name: "should fail when no bearer token is supplied",
 			rules: map[configuration.MatchingStrategy][]rule.Rule{
 				configuration.Regexp: {{
-					Match: &rule.MatchGRPC{
-						Authority:  "<([0-9a-zA-Z\\-]+)>.apis.ory.sh",
-						FullMethod: "grpc.testing.TestService/EmptyCall",
+					Match: &rule.MatchRPC{
+						Authority:  "<([0-9a-zA-Z\\-]+)>.example.com",
+						FullMethod: "ory.rpctest.TestService/Unary",
 					},
 					Authenticators: []rule.Handler{{Handler: "bearer_token"}},
 					Authorizer:     rule.Handler{Handler: "allow"},
 					Mutators:       []rule.Handler{{Handler: "noop"}},
 				}},
 				configuration.Glob: {{
-					Match: &rule.MatchGRPC{
-						Authority:  "<**>.apis.ory.sh",
-						FullMethod: "grpc.testing.TestService/EmptyCall",
+					Match: &rule.MatchRPC{
+						Authority:  "<**>.example.com",
+						FullMethod: "ory.rpctest.TestService/Unary",
 					},
 					Authenticators: []rule.Handler{{Handler: "bearer_token"}},
 					Authorizer:     rule.Handler{Handler: "allow"},
@@ -276,52 +284,50 @@ mutators:
 			name: "should succeed when correct bearer token is supplied",
 			rules: map[configuration.MatchingStrategy][]rule.Rule{
 				configuration.Regexp: {{
-					Match: &rule.MatchGRPC{
-						Authority:  "<([0-9a-zA-Z\\-]+)>.apis.ory.sh",
-						FullMethod: "grpc.testing.TestService/EmptyCall",
+					Match: &rule.MatchRPC{
+						Authority:  "<([0-9a-zA-Z\\-]+)>.example.com",
+						FullMethod: "ory.rpctest.TestService/Unary",
 					},
 					Authenticators: []rule.Handler{{Handler: "bearer_token"}},
 					Authorizer:     rule.Handler{Handler: "allow"},
 					Mutators:       []rule.Handler{{Handler: "noop"}},
 				}},
 				configuration.Glob: {{
-					Match: &rule.MatchGRPC{
-						Authority:  "<**>.apis.ory.sh",
-						FullMethod: "grpc.testing.TestService/EmptyCall",
+					Match: &rule.MatchRPC{
+						Authority:  "<**>.example.com",
+						FullMethod: "ory.rpctest.TestService/Unary",
 					},
 					Authenticators: []rule.Handler{{Handler: "bearer_token"}},
 					Authorizer:     rule.Handler{Handler: "allow"},
 					Mutators:       []rule.Handler{{Handler: "noop"}},
 				}},
 			},
-			dialOpts: []grpc.DialOption{grpc.WithPerRPCCredentials(
-				testToken("correct token"))},
+			bearer: new("correct token"),
 			assert: assert.NoError,
 		},
 		{
 			name: "should fail when incorrect bearer token is supplied",
 			rules: map[configuration.MatchingStrategy][]rule.Rule{
 				configuration.Regexp: {{
-					Match: &rule.MatchGRPC{
-						Authority:  "<([0-9a-zA-Z\\-]+)>.apis.ory.sh",
-						FullMethod: "grpc.testing.TestService/EmptyCall",
+					Match: &rule.MatchRPC{
+						Authority:  "<([0-9a-zA-Z\\-]+)>.example.com",
+						FullMethod: "ory.rpctest.TestService/Unary",
 					},
 					Authenticators: []rule.Handler{{Handler: "bearer_token"}},
 					Authorizer:     rule.Handler{Handler: "allow"},
 					Mutators:       []rule.Handler{{Handler: "noop"}},
 				}},
 				configuration.Glob: {{
-					Match: &rule.MatchGRPC{
-						Authority:  "<**>.apis.ory.sh",
-						FullMethod: "grpc.testing.TestService/EmptyCall",
+					Match: &rule.MatchRPC{
+						Authority:  "<**>.example.com",
+						FullMethod: "ory.rpctest.TestService/Unary",
 					},
 					Authenticators: []rule.Handler{{Handler: "bearer_token"}},
 					Authorizer:     rule.Handler{Handler: "allow"},
 					Mutators:       []rule.Handler{{Handler: "noop"}},
 				}},
 			},
-			dialOpts: []grpc.DialOption{grpc.WithPerRPCCredentials(
-				testToken("incorrect token"))},
+			bearer: new("incorrect token"),
 			assert: assertErrDenied,
 		},
 	}
@@ -330,20 +336,28 @@ mutators:
 
 	for _, tc := range cases {
 		t.Run("case="+tc.name, func(t *testing.T) {
-			client := testClient(t, l, tc.dialOpts...)
+			client := testClient(t, ts, tc.bearer)
 			for _, s := range strategies {
 				t.Run("strategy="+string(s), func(t *testing.T) {
-					require.NoError(t, reg.RuleRepository().SetMatchingStrategy(ctx, s))
-					require.NoError(t, reg.RuleRepository().Set(ctx, tc.rules[s]))
+					require.NoError(t, reg.RuleRepository().SetMatchingStrategy(t.Context(), s))
+					require.NoError(t, reg.RuleRepository().Set(t.Context(), tc.rules[s]))
 
-					_, err := client.EmptyCall(ctx, &grpc_testing.Empty{})
+					_, err := client.Unary(t.Context(), &rpctest.UnaryRequest{})
 					tc.assert(t, err)
 
-					_, err = client.UnaryCall(ctx, &grpc_testing.SimpleRequest{})
+					srvStream, err := client.ServerStream(t.Context(), &rpctest.ServerStreamRequest{})
+					require.NoError(t, err)
+					_, err = srvStream.Recv()
 					assertErrDenied(t, err)
 
-					stream, _ := client.StreamingOutputCall(ctx, &grpc_testing.StreamingOutputCallRequest{})
-					_, err = stream.Recv()
+					clStream, err := client.ClientStream(t.Context())
+					require.NoError(t, err)
+					_, err = clStream.CloseAndRecv()
+					assertErrDenied(t, err)
+
+					bidiStream, err := client.BidiStream(t.Context())
+					require.NoError(t, err)
+					_, err = bidiStream.Recv()
 					assertErrDenied(t, err)
 				})
 			}
@@ -351,44 +365,47 @@ mutators:
 	}
 }
 
-func assertErrDenied(t assert.TestingT, err error, _ ...interface{}) bool {
-	s, ok := status.FromError(err)
-	assert.Truef(t, ok, "error %v is not a status.Error (type: %T)", err, err)
-	assert.Equal(t, codes.Unauthenticated, s.Code())
-	return true
+func assertErrDenied(t assert.TestingT, err error, _ ...any) bool {
+	r := require.New(t.(require.TestingT))
+	r.Error(err)
+
+	sErr, sOK := status.FromError(err)
+	cErr, cOK := errors.AsType[*connect.Error](err)
+	r.Truef(sOK || cOK, "error %v is neither *status.Status nor *connect.Error (type: %[1]T)", err)
+
+	code := 0
+	if sOK {
+		code = int(sErr.Code())
+	} else if cOK {
+		code = int(cErr.Code())
+	}
+
+	return assert.EqualValuesf(t, codes.Unauthenticated, code, "%+v", err)
 }
 
 // Test that the middleware config does not read values from the environment.
 func TestMiddleware_EnvironmentIsolation(t *testing.T) {
-	ctx := context.Background()
 	envVals := []string{"true", "false"}
 	for _, envVal := range envVals {
 		t.Run("AUTHENTICATORS_NOOP_ENABLED="+envVal, func(t *testing.T) {
 			t.Setenv("AUTHENTICATORS_NOOP_ENABLED", envVal)
 
-			configFile := writeTestConfig(t, "config-*.yaml", "")
-			configPtr := new(configuration.Provider)
-			_, err := middleware.New(ctx,
+			configFile := writeTestConfigf(t, "")
+			mw, err := middleware.New(t.Context(),
 				middleware.WithConfigFile(configFile),
-				middleware.WithConfigProvider(configPtr),
 			)
 			require.NoError(t, err)
-			config := *configPtr
 
-			assert.Falsef(t, config.Get("authenticators.noop.enabled").(bool), "was: %v", config.Get("authenticators.noop.enabled"))
+			assert.Equal(t, false, mw.Registry().Config().Get("authenticators.noop.enabled"))
 		})
 	}
 }
 
 func TestMiddleware_LoadRulesFromJSON(t *testing.T) {
-	ctx := context.Background()
-
 	jsonRule := `
-	{
+{
   "authenticators": [
-   {
-    "handler": "noop"
-   }
+    { "handler": "noop" }
   ],
   "authorizer": {
    "handler": "allow"
@@ -401,9 +418,7 @@ func TestMiddleware_LoadRulesFromJSON(t *testing.T) {
    "url": "<(https|http)>://example.com:8080/service/webhooks<(|/.*)>"
   },
   "mutators": [
-   {
-    "handler": "noop"
-   }
+    { "handler": "noop" }
   ],
   "upstream": {
    "preserve_host": true,
@@ -413,9 +428,9 @@ func TestMiddleware_LoadRulesFromJSON(t *testing.T) {
 }`
 	var expected rule.Rule
 	require.NoError(t, json.Unmarshal([]byte(jsonRule), &expected))
-	rulesFile := writeTestConfig(t, "access-rules-*.json", "["+jsonRule+"]")
+	rulesFile := writeTestConfigf(t, "[%s]", jsonRule)
 
-	configFile := writeTestConfig(t, "config-*.yaml", fmt.Sprintf(`
+	configFile := writeTestConfigf(t, `
 access_rules:
   matching_strategy: regexp
   repositories:
@@ -429,19 +444,14 @@ authorizers:
 mutators:
   noop:
     enabled: true
-`, rulesFile))
+`, rulesFile)
 
-	regPtr := new(driver.Registry)
-	_, err := middleware.New(ctx,
-		middleware.WithConfigFile(configFile),
-		middleware.WithRegistry(regPtr),
-	)
+	mw, err := middleware.New(t.Context(), middleware.WithConfigFile(configFile))
 	require.NoError(t, err)
-	reg := *regPtr
 
 	time.Sleep(100 * time.Millisecond)
 
-	actual, err := reg.RuleRepository().Get(ctx, "some-rule-id")
+	actual, err := mw.Registry().RuleRepository().Get(t.Context(), "some-rule-id")
 	require.NoError(t, err)
 	assert.Equal(t, &expected, actual)
 }

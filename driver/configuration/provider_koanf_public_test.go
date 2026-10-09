@@ -13,8 +13,8 @@ import (
 	"github.com/rs/cors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel/trace/noop"
 
+	"github.com/ory/oathkeeper/internal"
 	"github.com/ory/x/configx"
 	"github.com/ory/x/logrusx"
 
@@ -26,14 +26,13 @@ import (
 	"github.com/ory/oathkeeper/pipeline/authz"
 	"github.com/ory/oathkeeper/pipeline/mutate"
 	"github.com/ory/oathkeeper/x"
-	"github.com/ory/x/otelx"
 )
 
 func setup(t *testing.T) *configuration.KoanfProvider {
 	p, err := configuration.NewKoanfProvider(
 		context.Background(),
 		nil,
-		logrusx.New(t.Name(), ""),
+		logrusx.NewT(t),
 		configx.WithConfigFiles("./../../internal/config/.oathkeeper.yaml"),
 	)
 	require.NoError(t, err)
@@ -111,7 +110,7 @@ func BenchmarkPipelineConfig(b *testing.B) {
 	p, err := configuration.NewKoanfProvider(
 		context.Background(),
 		nil,
-		logrusx.New(b.Name(), ""),
+		logrusx.NewT(b),
 		configx.WithConfigFiles("./../../internal/config/.oathkeeper.yaml"),
 	)
 	require.NoError(b, err)
@@ -137,7 +136,7 @@ func BenchmarkPipelineEnabled(b *testing.B) {
 	p, err := configuration.NewKoanfProvider(
 		context.Background(),
 		nil,
-		logrusx.New(b.Name(), ""),
+		logrusx.NewT(b),
 		configx.WithConfigFiles("./../../internal/config/.oathkeeper.yaml"),
 	)
 	require.NoError(b, err)
@@ -151,14 +150,8 @@ func BenchmarkPipelineEnabled(b *testing.B) {
 }
 
 func TestKoanfProvider(t *testing.T) {
-	logger := logrusx.New("", "")
-	p, err := configuration.NewKoanfProvider(
-		context.Background(),
-		nil,
-		logger,
-		configx.WithConfigFiles("./../../internal/config/.oathkeeper.yaml"),
-	)
-	require.NoError(t, err)
+	reg := internal.NewRegistry(t, configx.WithConfigFiles("./../../internal/config/.oathkeeper.yaml"))
+	p := reg.Config()
 
 	t.Run("group=serve", func(t *testing.T) {
 		assert.Equal(t, "127.0.0.1:1234", p.ProxyServeAddress())
@@ -174,6 +167,10 @@ func TestKoanfProvider(t *testing.T) {
 			assert.True(t, p.CORSEnabled("proxy"))
 			assert.True(t, p.CORSEnabled("api"))
 
+			proxyCORS := p.CORSOptions("proxy")
+			// configx sets AllowOriginVaryRequestFunc (boundary-safe matching); a
+			// func value is not comparable, so drop it before the struct equality.
+			proxyCORS.AllowOriginVaryRequestFunc = nil
 			assert.Equal(t, cors.Options{
 				AllowedOrigins:     []string{"https://example.com", "https://*.example.com"},
 				AllowedMethods:     []string{"POST", "GET", "PUT", "PATCH", "DELETE"},
@@ -183,8 +180,10 @@ func TestKoanfProvider(t *testing.T) {
 				AllowCredentials:   true,
 				OptionsPassthrough: false,
 				Debug:              true,
-			}, p.CORSOptions("proxy"))
+			}, proxyCORS)
 
+			apiCORS := p.CORSOptions("api")
+			apiCORS.AllowOriginVaryRequestFunc = nil
 			assert.Equal(t, cors.Options{
 				AllowedOrigins:     []string{"https://example.org", "https://*.example.org"},
 				AllowedMethods:     []string{"GET", "PUT", "PATCH", "DELETE"},
@@ -194,7 +193,7 @@ func TestKoanfProvider(t *testing.T) {
 				AllowCredentials:   true,
 				OptionsPassthrough: false,
 				Debug:              true,
-			}, p.CORSOptions("api"))
+			}, apiCORS)
 		})
 
 		t.Run("group=tls", func(t *testing.T) {
@@ -231,7 +230,7 @@ func TestKoanfProvider(t *testing.T) {
 
 	t.Run("group=authenticators", func(t *testing.T) {
 		t.Run("authenticator=anonymous", func(t *testing.T) {
-			a := authn.NewAuthenticatorAnonymous(p)
+			a := authn.NewAuthenticatorAnonymous(reg)
 			assert.True(t, p.AuthenticatorIsEnabled(a.GetID()))
 			require.NoError(t, a.Validate(nil))
 
@@ -241,13 +240,13 @@ func TestKoanfProvider(t *testing.T) {
 		})
 
 		t.Run("authenticator=noop", func(t *testing.T) {
-			a := authn.NewAuthenticatorNoOp(p)
+			a := authn.NewAuthenticatorNoOp(reg)
 			assert.True(t, p.AuthenticatorIsEnabled(a.GetID()))
 			require.NoError(t, a.Validate(nil))
 		})
 
 		t.Run("authenticator=cookie_session", func(t *testing.T) {
-			a := authn.NewAuthenticatorCookieSession(p, noop.NewTracerProvider())
+			a := authn.NewAuthenticatorCookieSession(reg)
 			assert.True(t, p.AuthenticatorIsEnabled(a.GetID()))
 			require.NoError(t, a.Validate(nil))
 
@@ -259,7 +258,7 @@ func TestKoanfProvider(t *testing.T) {
 		})
 
 		t.Run("authenticator=jwt", func(t *testing.T) {
-			a := authn.NewAuthenticatorJWT(p, nil)
+			a := authn.NewAuthenticatorJWT(reg)
 			assert.True(t, p.AuthenticatorIsEnabled(a.GetID()))
 			require.NoError(t, a.Validate(nil))
 
@@ -275,7 +274,7 @@ func TestKoanfProvider(t *testing.T) {
 		})
 
 		t.Run("authenticator=oauth2_client_credentials", func(t *testing.T) {
-			a := authn.NewAuthenticatorOAuth2ClientCredentials(p, logger)
+			a := authn.NewAuthenticatorOAuth2ClientCredentials(reg)
 			assert.True(t, p.AuthenticatorIsEnabled(a.GetID()))
 			require.NoError(t, a.Validate(nil))
 
@@ -285,7 +284,7 @@ func TestKoanfProvider(t *testing.T) {
 		})
 
 		t.Run("authenticator=oauth2_introspection", func(t *testing.T) {
-			a := authn.NewAuthenticatorOAuth2Introspection(p, logger, noop.NewTracerProvider())
+			a := authn.NewAuthenticatorOAuth2Introspection(reg)
 			assert.True(t, p.AuthenticatorIsEnabled(a.GetID()))
 			require.NoError(t, a.Validate(nil))
 
@@ -304,26 +303,26 @@ func TestKoanfProvider(t *testing.T) {
 		})
 
 		t.Run("authenticator=unauthorized", func(t *testing.T) {
-			a := authn.NewAuthenticatorUnauthorized(p)
+			a := authn.NewAuthenticatorUnauthorized(reg)
 			assert.True(t, p.AuthenticatorIsEnabled(a.GetID()))
 		})
 	})
 
 	t.Run("group=authorizers", func(t *testing.T) {
 		t.Run("authorizer=allow", func(t *testing.T) {
-			a := authz.NewAuthorizerAllow(p)
+			a := authz.NewAuthorizerAllow(reg)
 			assert.True(t, p.AuthorizerIsEnabled(a.GetID()))
 			require.NoError(t, a.Validate(nil))
 		})
 
 		t.Run("authorizer=deny", func(t *testing.T) {
-			a := authz.NewAuthorizerDeny(p)
+			a := authz.NewAuthorizerDeny(reg)
 			assert.True(t, p.AuthorizerIsEnabled(a.GetID()))
 			require.NoError(t, a.Validate(nil))
 		})
 
 		t.Run("authorizer=keto_engine_acp_ory", func(t *testing.T) {
-			a := authz.NewAuthorizerKetoEngineACPORY(p, otelx.NewNoop())
+			a := authz.NewAuthorizerKetoEngineACPORY(reg)
 			assert.True(t, p.AuthorizerIsEnabled(a.GetID()))
 			require.NoError(t, a.Validate(nil))
 
@@ -334,7 +333,7 @@ func TestKoanfProvider(t *testing.T) {
 		})
 
 		t.Run("authorizer=remote_json", func(t *testing.T) {
-			a := authz.NewAuthorizerRemoteJSON(p, otelx.NewNoop())
+			a := authz.NewAuthorizerRemoteJSON(reg)
 			assert.True(t, p.AuthorizerIsEnabled(a.GetID()))
 			require.NoError(t, a.Validate(nil))
 
@@ -348,31 +347,31 @@ func TestKoanfProvider(t *testing.T) {
 
 	t.Run("group=mutators", func(t *testing.T) {
 		t.Run("mutator=noop", func(t *testing.T) {
-			a := mutate.NewMutatorNoop(p)
+			a := mutate.NewMutatorNoop(reg)
 			assert.True(t, p.MutatorIsEnabled(a.GetID()))
 			require.NoError(t, a.Validate(nil))
 		})
 
 		t.Run("mutator=cookie", func(t *testing.T) {
-			a := mutate.NewMutatorCookie(p)
+			a := mutate.NewMutatorCookie(reg)
 			assert.True(t, p.MutatorIsEnabled(a.GetID()))
 			require.NoError(t, a.Validate(nil))
 		})
 
 		t.Run("mutator=header", func(t *testing.T) {
-			a := mutate.NewMutatorHeader(p)
+			a := mutate.NewMutatorHeader(reg)
 			assert.True(t, p.MutatorIsEnabled(a.GetID()))
 			require.NoError(t, a.Validate(nil))
 		})
 
 		t.Run("mutator=hydrator", func(t *testing.T) {
-			a := mutate.NewMutatorHydrator(p, new(x.TestLoggerProvider))
+			a := mutate.NewMutatorHydrator(reg)
 			assert.True(t, p.MutatorIsEnabled(a.GetID()))
 			require.NoError(t, a.Validate(nil))
 		})
 
 		t.Run("mutator=id_token", func(t *testing.T) {
-			a := mutate.NewMutatorIDToken(p, nil)
+			a := mutate.NewMutatorIDToken(reg)
 			assert.True(t, p.MutatorIsEnabled(a.GetID()))
 			require.NoError(t, a.Validate(nil))
 
@@ -390,7 +389,7 @@ func TestToScopeStrategy(t *testing.T) {
 	p, err := configuration.NewKoanfProvider(
 		context.Background(),
 		nil,
-		logrusx.New("", ""),
+		logrusx.NewT(t),
 		configx.WithConfigFiles("./../../internal/config/.oathkeeper.yaml"),
 	)
 	require.NoError(t, err)
@@ -403,15 +402,11 @@ func TestToScopeStrategy(t *testing.T) {
 }
 
 func TestAuthenticatorOAuth2TokenIntrospectionPreAuthorization(t *testing.T) {
-	p, err := configuration.NewKoanfProvider(
-		context.Background(),
-		nil,
-		logrusx.New("", ""),
+	reg := internal.NewRegistry(t,
 		configx.WithConfigFiles("./../../internal/config/.oathkeeper.yaml"),
 		configx.WithValue("authenticators.oauth2_introspection.enabled", true),
 		configx.WithValue("authenticators.oauth2_introspection.config.introspection_url", "http://some-url/"),
 	)
-	require.NoError(t, err)
 
 	for k, tc := range []struct {
 		enabled bool
@@ -431,7 +426,7 @@ func TestAuthenticatorOAuth2TokenIntrospectionPreAuthorization(t *testing.T) {
 		{enabled: true, id: "a", secret: "b", turl: "https://some-url", err: false},
 	} {
 		t.Run(fmt.Sprintf("case=%d", k), func(t *testing.T) {
-			a := authn.NewAuthenticatorOAuth2Introspection(p, logrusx.New("", ""), noop.NewTracerProvider())
+			a := authn.NewAuthenticatorOAuth2Introspection(reg)
 
 			config, _, err := a.Config(json.RawMessage(fmt.Sprintf(`{
 	"pre_authorization": {
@@ -443,9 +438,9 @@ func TestAuthenticatorOAuth2TokenIntrospectionPreAuthorization(t *testing.T) {
 }`, tc.enabled, tc.id, tc.secret, tc.turl)))
 
 			if tc.err {
-				assert.Error(t, err, "%+v", config)
+				assert.Errorf(t, err, "%+v", config)
 			} else {
-				assert.NoError(t, err, "%+v", config)
+				assert.NoErrorf(t, err, "%+v", config)
 			}
 		})
 	}

@@ -35,7 +35,7 @@ func WatchDirectory(ctx context.Context, dir string, c EventChannel) (Watcher, e
 	}
 
 	dw := &directoryWatcher{
-		dispatcher: newDispatcher(),
+		dispatcher: newDispatcher(ctx),
 		c:          c,
 		dir:        dir,
 		subDirs:    subDirs,
@@ -53,7 +53,7 @@ type directoryWatcher struct {
 	// potentially by external callers (e.g. tests) concurrently.
 	subDirsMtx sync.RWMutex
 	subDirs    map[string]struct{}
-	w       *fsnotify.Watcher
+	w          *fsnotify.Watcher
 }
 
 func (w *directoryWatcher) handleEvent(ctx context.Context, e fsnotify.Event) {
